@@ -11,6 +11,8 @@ final class LocalServer {
     private let server = Server()
     private let root: URL
     private let log = Logger(subsystem: "app.ish.iSH.KTGSS9PB3A", category: "server")
+    /// Routes the VM's /net WebSocket to a NetBridge (guest TCP -> NWConnection egress).
+    private let netDemux = WebSocketDemux()
 
     /// Fixed loopback port so the page origin (http://127.0.0.1:<port>) is stable
     /// — lets a Headscale CORS allow-list pin an exact origin. Falls back to an
@@ -23,6 +25,11 @@ final class LocalServer {
     var port: UInt16 { UInt16(server.port) }
 
     func start() throws {
+        // WebSocket egress relay: /net upgrades are routed to the demux (NetBridge),
+        // even though a catch-all HTTP route exists — Telegraph dispatches WS upgrades
+        // to the delegate before HTTP routing.
+        server.webSocketConfig.pingInterval = 30
+        server.webSocketDelegate = netDemux
         // Telegraph evaluates routes in registration order; these catch-alls are the only routes.
         server.route(.HEAD, regex: "^/.*$") { [weak self] req in
             self?.handleHead(req) ?? HTTPResponse(.serviceUnavailable)

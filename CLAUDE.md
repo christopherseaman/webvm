@@ -147,19 +147,23 @@ Reusable as-is: timestamp build number, on-the-fly `ExportOptions.plist`, single
 - ASC API key: `~/.appstoreconnect/private_keys/AuthKey_YTYL3XKZXH.p8` (not in repo). Key id / issuer id / team live in gitignored `ios/.asc.env` (copy from `ios/.asc.env.example`); `testflight.sh` sources it. Never commit the `.p8`.
 - Signing is fully automatic (`CODE_SIGN_STYLE=Automatic`, `-allowProvisioningUpdates` + the API key). A 1024² opaque app icon (`ios/App/Assets.xcassets/AppIcon`) is mandatory for upload.
 
-### Networking (preconfigured Headscale)
+### Networking (DirectSockets via on-device relay — IMPLEMENTED, the default)
 
-WebVM's networking is Tailscale via an in-browser Go→Wasm client (no raw sockets). To skip interactive login, the app preconfigures a self-hosted **Headscale**:
-- Put `HEADSCALE_CONTROL_URL` + `HEADSCALE_AUTH_KEY` (an ephemeral, single-use preauth key) in gitignored `ios/.network.env` (see `.network.env.example`).
-- `stage.sh` bakes them into a bundled `App/Generated/HeadscaleConfig.json`; `NetworkConfig.swift` reads it; `WasmWebView` appends `#authKey=…&controlUrl=…` (percent-encoded to unreserved chars) to the loaded URL, which `src/lib/network.js` already parses. Empty config → interactive-login fallback (non-breaking). **No `src/` changes.**
-- **Owner must provide** (cannot be coded): a reachable Headscale URL; an ephemeral preauth key (`headscale preauthkeys create --ephemeral --reusable=false`); CORS on Headscale allowing the loopback origin `http://127.0.0.1:47821` (the LocalServer port is fixed precisely so this exact-match origin is stable); and a reachable DERP relay (browser data transit is DERP-over-WebSocket — no UDP).
-- A same-origin reverse proxy through the local server was **rejected**: Telegraph returns fully-buffered responses and cannot relay the long-lived DERP WebSocket. Caveat: the auth key ships inside the `.ipa` (extractable) — ephemeral single-use keys mitigate.
-- Verified on simulator: config loads, the fragment reaches `location.hash` (`hash{controlUrl:true,authKey:true}`), VM still boots. The live connection is unverified (needs the above infra).
+**The VM reaches the internet straight through the device's own connection — no Tailscale, no Headscale, no relay server, zero extra hops** (chosen for spotty/travel connectivity). This supersedes the Tailscale/Headscale plan for the device-host use case.
+
+Key discovery: CheerpX's engine (`cx_esm.js`) exports a **`DirectSocketsNetwork`** backend (not in the npm `index.d.ts`). If the `networkInterface` passed to `Linux.create` has **no `netmapUpdateCb`** but provides **`TCPSocket(host, port)`** (a WHATWG Direct-Sockets shape), CheerpX routes guest TCP through it instead of Tailscale. Mechanism (ported from w-shell, device-verified):
+- `src/lib/net/webvm-net-transport.js` (+ `frame-codec.js`, `_le.js`) — a `networkInterface` whose `TCPSocket` frames each guest connection over a loopback **WebSocket** to `ws://127.0.0.1:47821/net`. `WebVM.svelte` uses it when `configObj.netTransport === "directsockets"` (set in `config_ios_terminal.js`).
+- `ios/App/NetBridge.swift` — Telegraph `/net` WS handler → `NWConnection` dials each connection out the device's network and pumps bytes both ways (frame: `op|conn_id(4LE)|len(4LE)|payload`, byte-identical to the JS codec). Wired via `LocalServer`'s `webSocketDelegate`.
+- **Egress must use `NWConnection`, not raw POSIX sockets** (those fail `ECONNREFUSED` on-device without `IP_BOUND_IF`) — the load-bearing lesson inherited from w-shell.
+- **Verified on simulator (CheerpX 1.3.5):** a full HTTP round-trip — guest `GET` (33 B) → `1.1.1.1:80` via the device → 381 B response back to the VM. TCP egress + bidirectional data confirmed in the native `net` logs (at `os_log` `.info` — capture with `log show --info`).
+- **DNS:** UDP is not yet bridged (`UDPSocket` stubbed), so resolution uses **DNS-over-TCP** — `RES_OPTIONS=use-vc` is set in `config_ios_terminal.js` `opts.env`, and `NWConnection` resolves hostnames device-side. Full UDP DNS (a `UDPSocket` bridge) is the remaining polish.
+
+The Tailscale/Headscale path (`src/lib/network.js`, `NetworkConfig.swift`, `HeadscaleConfig.json`, `.network.env`) remains for **tailnet-peer** access (reaching your own machines), selected when `netTransport` is unset; it is not needed for plain internet.
 
 ### Feature roadmap (in owner's priority order)
 
 1. ✅ **Boot in WKWebView** — done; see [Working app](#working-app-ios-verified-2026-06-24).
-2. ✅ **Preconfigured Headscale** — mechanism built & sim-verified (above); activates when the owner supplies `ios/.network.env` + a CORS/DERP-reachable Headscale. Live connection still to validate.
+2. ✅ **Internet via device host (no Tailscale)** — DONE & sim-verified via CheerpX DirectSockets + on-device `NWConnection` relay (full HTTP round-trip through the device). See [Networking](#networking-directsockets-via-on-device-relay--implemented-the-default). Remaining polish: UDP-socket bridge for native UDP DNS (TCP DNS works today via `use-vc`).
 
 Later (larger) requests:
 

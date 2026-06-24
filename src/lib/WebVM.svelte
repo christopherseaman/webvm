@@ -7,6 +7,7 @@
 	import '@xterm/xterm/css/xterm.css'
 	import '@fortawesome/fontawesome-free/css/all.min.css'
 	import { networkInterface, startLogin } from '$lib/network.js'
+	import { WebVMRawSocketTransport } from '$lib/net/webvm-net-transport.js'
 	import { cpuActivity, diskActivity, cpuPercentage, diskLatency } from '$lib/activities.js'
 	import { introMessage, errorMessage, unexpectedErrorMessage } from '$lib/messages.js'
 	import { displayConfig, handleToolImpl } from '$lib/anthropic.js'
@@ -305,7 +306,13 @@
 		];
 		try
 		{
-			cx = await CheerpX.Linux.create({mounts: mountPoints, networkInterface: networkInterface});
+			// "directsockets": tunnel guest TCP over a loopback WebSocket to the
+			// native NWConnection relay (no netmapUpdateCb -> CheerpX DirectSocketsNetwork).
+			// Otherwise use the default Tailscale networkInterface.
+			const netIf = configObj.netTransport === "directsockets"
+				? new WebVMRawSocketTransport(configObj.netWs)
+				: networkInterface;
+			cx = await CheerpX.Linux.create({mounts: mountPoints, networkInterface: netIf});
 		}
 		catch(e)
 		{
