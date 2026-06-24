@@ -7,3 +7,7 @@ web/webroot/
 DerivedData/
 # App Store Connect auth (identifiers live here; copy from .asc.env.example)
 .asc.env
+# Preconfigured Headscale networking (secret join key; copy from .network.env.example)
+.network.env
+# Generated at stage time from .network.env, bundled as a resource
+App/Generated/

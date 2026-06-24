@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project intent
 
-This is a **fork** of [leaningtech/webvm](https://github.com/leaningtech/webvm) (`origin` = `christopherseaman/webvm`, `upstream` = `leaningtech/webvm`). WebVM is a browser-based x86 Linux VM. The active goal of this fork is to **ship WebVM as an iOS/iPadOS app** (WKWebView wrapper) and distribute it via TestFlight. See [iOS conversion](#ios-conversion) below — that work does not live in this repo yet.
+This is a **fork** of [leaningtech/webvm](https://github.com/leaningtech/webvm) (`origin` = `christopherseaman/webvm`, `upstream` = `leaningtech/webvm`). WebVM is a browser-based x86 Linux VM. The active goal of this fork is to run **WebVM as an iOS/iPadOS app** (WKWebView wrapper) distributed via TestFlight — a **personal research project**, not App Store distribution. The working app lives in `ios/` (boots to a shell, uploads to TestFlight). See [iOS conversion](#ios-conversion).
 
 ### Working rules (from the project owner)
 
@@ -83,27 +83,31 @@ Goal: wrap the WebVM static build in a **WKWebView** iOS/iPadOS app and ship via
 
 External prior art for component patterns (study, don't fork): **a-Shell** (the keep-a-hidden-WKWebView-alive-for-JIT pattern; offline tool packaging) and **Blink Shell** (polished iOS terminal UX — keyboard/soft-keyboard handling, fonts/themes, touch gestures, select/copy/paste). Lean on these for the terminal-UX roadmap items below rather than building input/clipboard handling from scratch.
 
-### Working spike (verified 2026-06-24)
+### Working app (`ios/`, verified 2026-06-24)
 
-A minimal, **additive** spike in `ios/` boots WebVM to an interactive bash shell in WKWebView on the iPad simulator. Build/run it:
+A minimal, **additive** iOS/iPadOS app in `ios/` boots WebVM to an interactive bash shell in WKWebView and uploads to TestFlight. Build/run:
 
 ```sh
-cd ios && ./build.sh   # stages web+disk, xcodegen, builds, installs+launches on the booted simulator
-# boot trace (crossOriginIsolated, disk range-fetches, terminal text):
-xcrun simctl spawn booted log show --style compact --last 2m --predicate 'subsystem == "app.ish.iSH"'
+cd ios && ./build.sh        # simulator: stage web+disk, xcodegen, build, install+launch
+cd ios && ./testflight.sh   # device archive -> sign -> upload to TestFlight (needs ios/.asc.env + the .p8)
+# boot trace (crossOriginIsolated, headscale state, disk range-fetches, terminal text):
+xcrun simctl spawn booted log show --style compact --last 2m --predicate 'subsystem == "app.ish.iSH.KTGSS9PB3A"'
 ```
 
-What it is (each file is small and single-purpose):
-- `ios/App/LocalServer.swift` + `Headers.swift` — Telegraph HTTP server on `127.0.0.1:<ephemeral>`, serving the bundled web build + disk image with COOP/COEP/CORP on every response, Range/206, and `Last-Modified`.
-- `ios/App/WasmWebView.swift` — full-screen `WKWebView` (stock config) + a `console.log`→`os_log` bridge that reports `crossOriginIsolated`/SAB and samples terminal text.
-- `ios/App/ContentView.swift` / `WebVMApp.swift` — start server, gate the web view on the port, plus a loopback `URLSession` self-diagnostic that logs the COI headers actually on the wire.
-- `ios/project.yml` — single XcodeGen target, bundle `app.ish.iSH`, team `KTGSS9PB3A`, iOS 17, one remote SwiftPM dep (Telegraph 0.40.0). `WebVM.xcodeproj` is generated/gitignored.
-- `ios/stage.sh` — `WEBVM_MODE=ios npm run build` → stage `build/` + APFS-clone `custom-disk-images/debian_mini.ext2` into `ios/web/webroot/` (folder reference, gitignored).
-- Fork changes are 2 lines: a `WEBVM_MODE=ios` branch in `vite.config.js` and a new `config_ios_terminal.js` (`diskImageType:"bytes"`, `/disk/debian_mini.ext2`). The default cloud config is untouched.
+What it is (each file small and single-purpose):
+- `ios/App/LocalServer.swift` + `Headers.swift` — Telegraph HTTP server on `127.0.0.1` (fixed port **47821**, ephemeral fallback) serving the bundled web build + disk image with COOP/COEP/CORP on every response, Range/206, `Last-Modified`.
+- `ios/App/WasmWebView.swift` — full-screen `WKWebView` (stock config) + a `console.log`→`os_log` bridge; injects `#authKey=…&controlUrl=…` (percent-encoded) into the loaded URL.
+- `ios/App/NetworkConfig.swift` — loads preconfigured Headscale `controlUrl`/`authKey` from a bundled `HeadscaleConfig.json` (nil → interactive-login fallback). See [Networking](#networking-preconfigured-headscale).
+- `ios/App/ContentView.swift` / `WebVMApp.swift` — start server, gate the web view on the port, loopback `URLSession` self-diagnostic logging the COI headers on the wire.
+- `ios/App/Assets.xcassets` — `AppIcon` (1024² opaque tesseract). `ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon` lets actool inject `CFBundleIconName` (required for TestFlight upload; simulator builds don't need it).
+- `ios/project.yml` — single XcodeGen target, bundle **`app.ish.iSH.KTGSS9PB3A`**, team `KTGSS9PB3A`, iOS 17, one remote SwiftPM dep (Telegraph 0.40.0). `WebVM.xcodeproj` generated/gitignored.
+- `ios/stage.sh` — `WEBVM_MODE=ios npm run build` → stage `build/` + APFS-clone `custom-disk-images/debian_mini.ext2` into `ios/web/webroot/` (folder reference, gitignored); generate `App/Generated/HeadscaleConfig.json` from `ios/.network.env`.
+- `ios/testflight.sh` — stamp timestamp `CFBundleVersion`, archive, on-the-fly `ExportOptions.plist`, `xcodebuild -exportArchive` upload via the `.p8` key (config in gitignored `ios/.asc.env`).
+- Fork changes are 2 lines: a `WEBVM_MODE=ios` branch in `vite.config.js` + `config_ios_terminal.js` (`diskImageType:"bytes"`, `/disk/debian_mini.ext2`). Default cloud config untouched.
 
-Verified on simulator (iPad Pro 11" M5, iOS 26): `crossOriginIsolated=true`, `SharedArrayBuffer` available, 8 cores; COI headers confirmed on the wire; CheerpX engine loaded from `cxrtnc.leaningtech.com` (CDN sends `CORP: cross-origin`); the 600 MB `debian_mini.ext2` range-fetched from the local server (CheerpX probes size via `Range: bytes=0-1`, so the HEAD route is unused); Debian reached an interactive `user@:~$` prompt.
+Verified — **simulator** (iPad Pro 11" M5, iOS 26): `crossOriginIsolated=true`, SAB available, 8 cores; COI headers on the wire; CheerpX engine from `cxrtnc.leaningtech.com` (`CORP: cross-origin`); 600 MB `debian_mini.ext2` range-fetched locally (CheerpX probes size via `Range: bytes=0-1`, so the HEAD route is unused); Debian reached `user@:~$`. **TestFlight**: Release archive signed + uploaded to `app.ish.iSH.KTGSS9PB3A` (build ~300 MB — the ext2 is mostly empty/compressible, so the zipped `.ipa` is ~half; it expands to ~600 MB on install).
 
-Not yet validated (next phases, not blockers to feasibility): real-device run (WebKit JIT/memory limits differ from the Mac-hosted simulator); the disk-image size strategy for an App-Store binary (600 MB–2 GB is the core shipping problem); code signing / TestFlight upload; the CheerpX redistribution license. A benign `Ignoring Event: localhost` console line appears during boot (cosmetic).
+Not yet validated (next phases): real-device run (WebKit JIT/memory differ from the Mac-hosted simulator); disk-image size strategy (the ~600 MB image is the core size cost); a live Headscale connection (needs the owner's server + CORS + DERP). A benign `Ignoring Event: localhost` console line appears during boot.
 
 ### Architecture decision (the hard-won part)
 
@@ -134,17 +138,28 @@ Both reference repos use **App Store Connect API-key (`.p8`) auth exclusively** 
 
 Reusable as-is: timestamp build number, on-the-fly `ExportOptions.plist`, single-key dual-purpose auth, the **`/usr/bin`-first PATH workaround** (Homebrew `rsync` breaks `xcodebuild -exportArchive`), and `ITSAppUsesNonExemptEncryption=false` in `Info.plist` (avoids the export-compliance stall). **Replace** goobusters' `bundle_python.sh` entirely — WebVM has no Python backend; the "bundle" step instead stages the WebVM `build/` dir + a `debian_mini` `.ext2`.
 
+**Implemented** as `ios/testflight.sh` (this flow, minus the JWT "What to Test" notes step) and verified — a Release build uploaded to TestFlight for `app.ish.iSH.KTGSS9PB3A`.
+
 ### App Store identity
 
-- **Apple Team ID: `KTGSS9PB3A`** (shared across w-shell and goobusters).
-- **Designated bundle id for this project: `app.ish.iSH`** (under team `KTGSS9PB3A`) — per the project owner, an unused/dormant placeholder record to reuse. (w-shell's notes describe `app.ish.iSH` as a dormant "Placeholder (badmath)" probe; the owner has assigned it to this project. The app record must already exist in App Store Connect — the upload chain does not create it.)
-- ASC API key lives at `~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8` (not in any repo). Key id + issuer id are configured in `goobusters/dot.yaml` (`app_store` block) and `w-shell/tools/build-ios.sh` — read them from there; never commit the `.p8`.
-- Signing is fully automatic (`CODE_SIGN_STYLE=Automatic`, `-allowProvisioningUpdates`); add an `.entitlements` file only if WebVM needs a capability the references don't (e.g. JIT/local-network specifics).
+- **Apple Team ID: `KTGSS9PB3A`**.
+- **Bundle id: `app.ish.iSH.KTGSS9PB3A`** — the *literal* bundle id (it embeds the team suffix; it is NOT `app.ish.iSH` + a separate team). It maps to the existing **"Placeholder (badmath)"** App Store Connect record, **app id 6754670783**, reused for this project. Confirmed via the ASC API: plain `app.ish.iSH` has no App ID/record, so using it fails export at "Downloading App Information". The chain uploads to the existing record; it does not create apps.
+- ASC API key: `~/.appstoreconnect/private_keys/AuthKey_YTYL3XKZXH.p8` (not in repo). Key id / issuer id / team live in gitignored `ios/.asc.env` (copy from `ios/.asc.env.example`); `testflight.sh` sources it. Never commit the `.p8`.
+- Signing is fully automatic (`CODE_SIGN_STYLE=Automatic`, `-allowProvisioningUpdates` + the API key). A 1024² opaque app icon (`ios/App/Assets.xcassets/AppIcon`) is mandatory for upload.
+
+### Networking (preconfigured Headscale)
+
+WebVM's networking is Tailscale via an in-browser Go→Wasm client (no raw sockets). To skip interactive login, the app preconfigures a self-hosted **Headscale**:
+- Put `HEADSCALE_CONTROL_URL` + `HEADSCALE_AUTH_KEY` (an ephemeral, single-use preauth key) in gitignored `ios/.network.env` (see `.network.env.example`).
+- `stage.sh` bakes them into a bundled `App/Generated/HeadscaleConfig.json`; `NetworkConfig.swift` reads it; `WasmWebView` appends `#authKey=…&controlUrl=…` (percent-encoded to unreserved chars) to the loaded URL, which `src/lib/network.js` already parses. Empty config → interactive-login fallback (non-breaking). **No `src/` changes.**
+- **Owner must provide** (cannot be coded): a reachable Headscale URL; an ephemeral preauth key (`headscale preauthkeys create --ephemeral --reusable=false`); CORS on Headscale allowing the loopback origin `http://127.0.0.1:47821` (the LocalServer port is fixed precisely so this exact-match origin is stable); and a reachable DERP relay (browser data transit is DERP-over-WebSocket — no UDP).
+- A same-origin reverse proxy through the local server was **rejected**: Telegraph returns fully-buffered responses and cannot relay the long-lived DERP WebSocket. Caveat: the auth key ships inside the `.ipa` (extractable) — ephemeral single-use keys mitigate.
+- Verified on simulator: config loads, the fragment reaches `location.hash` (`hash{controlUrl:true,authKey:true}`), VM still boots. The live connection is unverified (needs the above infra).
 
 ### Feature roadmap (in owner's priority order)
 
-1. **Successful boot** in WKWebView (the gate everything else depends on — cross-origin isolation + CheerpX JIT working on-device).
-2. **Preconfigured local Headscale** for networking (replacing the interactive Tailscale login). The plumbing already exists — `src/lib/network.js` reads `controlUrl` (and `authKey`) from the URL hash and passes them into `CheerpX.Linux.create`; the README documents Headscale as a supported self-hosted control server. The elegant path is to **inject a fixed `controlUrl`/`authKey` pointing at a bundled/local Headscale** via the native wrapper, not to write new networking code. Note the README's Headscale CORS-proxy requirement and re-evaluate it for the local-server origin.
+1. ✅ **Boot in WKWebView** — done; see [Working app](#working-app-ios-verified-2026-06-24).
+2. ✅ **Preconfigured Headscale** — mechanism built & sim-verified (above); activates when the owner supplies `ios/.network.env` + a CORS/DERP-reachable Headscale. Live connection still to validate.
 
 Later (larger) requests:
 

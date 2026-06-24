@@ -25,5 +25,25 @@ cp -R "$REPO_ROOT/build/." "$WEBROOT/"
 echo "==> Placing disk image (APFS clone if possible)"
 cp -c "$IMG" "$WEBROOT/disk/debian_mini.ext2" 2>/dev/null || cp "$IMG" "$WEBROOT/disk/debian_mini.ext2"
 
+echo "==> Generating Headscale config (from .network.env if present)"
+GEN_DIR="$SCRIPT_DIR/App/Generated"
+mkdir -p "$GEN_DIR"
+HEADSCALE_CONTROL_URL=""
+HEADSCALE_AUTH_KEY=""
+if [[ -f "$SCRIPT_DIR/.network.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/.network.env"
+fi
+# Safe JSON encoding via python3 (stdlib only). Empty -> null -> app falls back to interactive login.
+CONTROL_URL="$HEADSCALE_CONTROL_URL" AUTH_KEY="$HEADSCALE_AUTH_KEY" \
+  python3 - "$GEN_DIR/HeadscaleConfig.json" <<'PY'
+import json, os, sys
+cfg = {"controlUrl": os.environ.get("CONTROL_URL") or None,
+       "authKey": os.environ.get("AUTH_KEY") or None}
+with open(sys.argv[1], "w") as f:
+    json.dump(cfg, f)
+PY
+echo "    headscale configured: $([ -n "$HEADSCALE_CONTROL_URL$HEADSCALE_AUTH_KEY" ] && echo yes || echo 'no (interactive login)')"
+
 echo "==> Staged: $(du -sh "$WEBROOT" | cut -f1) at $WEBROOT"
 ls "$WEBROOT/index.html" "$WEBROOT/disk/debian_mini.ext2" >/dev/null && echo "==> OK: index.html + disk image present"

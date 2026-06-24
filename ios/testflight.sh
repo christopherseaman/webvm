@@ -81,4 +81,4 @@ PATH=/usr/bin:$PATH xcodebuild -exportArchive \
   -authenticationKeyID "$ASC_KEY_ID" \
   -authenticationKeyIssuerID "$ASC_ISSUER_ID"
 
-echo "==> Uploaded build $BUILD_NUM to TestFlight (bundle app.ish.iSH). Processing takes a few minutes."
+echo "==> Uploaded build $BUILD_NUM to TestFlight (bundle app.ish.iSH.KTGSS9PB3A). Processing takes a few minutes."

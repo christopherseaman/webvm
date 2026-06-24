@@ -10,7 +10,12 @@ import Telegraph
 final class LocalServer {
     private let server = Server()
     private let root: URL
-    private let log = Logger(subsystem: "app.ish.iSH", category: "server")
+    private let log = Logger(subsystem: "app.ish.iSH.KTGSS9PB3A", category: "server")
+
+    /// Fixed loopback port so the page origin (http://127.0.0.1:<port>) is stable
+    /// — lets a Headscale CORS allow-list pin an exact origin. Falls back to an
+    /// OS-assigned ephemeral port if this one is already taken.
+    static let preferredPort = 47821
 
     init(root: URL) { self.root = root }
 
@@ -25,7 +30,12 @@ final class LocalServer {
         server.route(.GET, regex: "^/.*$") { [weak self] req in
             self?.handleGet(req) ?? HTTPResponse(.serviceUnavailable)
         }
-        try server.start(port: 0, interface: "127.0.0.1")
+        do {
+            try server.start(port: Self.preferredPort, interface: "127.0.0.1")
+        } catch {
+            log.warning("preferred port \(Self.preferredPort, privacy: .public) unavailable; using ephemeral port")
+            try server.start(port: 0, interface: "127.0.0.1")
+        }
         log.notice("started on 127.0.0.1:\(self.port, privacy: .public) root=\(self.root.path, privacy: .public)")
     }
 

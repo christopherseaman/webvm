@@ -36,8 +36,9 @@ targets:
     settings:
       base:
         INFOPLIST_FILE: App/Info.plist   # do NOT use `info:` — it would regenerate and clobber ATS keys
-        PRODUCT_BUNDLE_IDENTIFIER: app.ish.iSH
+        PRODUCT_BUNDLE_IDENTIFIER: app.ish.iSH.KTGSS9PB3A
         PRODUCT_NAME: WebVM
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon   # actool injects CFBundleIconName + sizes (required by TestFlight)
     dependencies:
       - package: Telegraph
         product: Telegraph

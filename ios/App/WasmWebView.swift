@@ -8,8 +8,23 @@ import os
 /// boot can be observed from native logs.
 struct WasmWebView: UIViewRepresentable {
     let port: UInt16
+    var controlUrl: String? = nil
+    var authKey: String? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
+
+    /// Build the URL fragment network.js parses (it reads `location.hash` as
+    /// URLSearchParams). Percent-encode each value down to unreserved chars so
+    /// ':' '/' '&' '=' '+' in URLs/keys survive intact through the &-split.
+    static func fragment(controlUrl: String?, authKey: String?) -> String {
+        let unreserved = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        func enc(_ s: String) -> String { s.addingPercentEncoding(withAllowedCharacters: unreserved) ?? s }
+        var parts: [String] = []
+        if let k = authKey { parts.append("authKey=" + enc(k)) }
+        if let c = controlUrl { parts.append("controlUrl=" + enc(c)) }
+        return parts.isEmpty ? "" : "#" + parts.joined(separator: "&")
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
@@ -24,7 +39,8 @@ struct WasmWebView: UIViewRepresentable {
         #if DEBUG
         webView.isInspectable = true
         #endif
-        let url = URL(string: "http://127.0.0.1:\(port)/index.html")!
+        let frag = Self.fragment(controlUrl: controlUrl, authKey: authKey)
+        let url = URL(string: "http://127.0.0.1:\(port)/index.html\(frag)")!
         webView.load(URLRequest(url: url))
         return webView
     }
@@ -32,7 +48,7 @@ struct WasmWebView: UIViewRepresentable {
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
-        private let log = Logger(subsystem: "app.ish.iSH", category: "webconsole")
+        private let log = Logger(subsystem: "app.ish.iSH.KTGSS9PB3A", category: "webconsole")
 
         /// Injected at document start: forwards console.* + errors to native,
         /// reports the cross-origin-isolation env immediately, then ticks for
@@ -68,7 +84,9 @@ struct WasmWebView: UIViewRepresentable {
                    ' WASM=' + (typeof WebAssembly !== 'undefined') +
                    ' cores=' + (navigator.hardwareConcurrency || '?');
           }
-          send('log', ['[ENV]', env()]);
+          send('log', ['[ENV]', env(),
+            'hash{controlUrl:' + location.hash.includes('controlUrl') +
+            ',authKey:' + location.hash.includes('authKey') + '}']);
           var ticks = 0;
           var iv = setInterval(function () {
             ticks++;

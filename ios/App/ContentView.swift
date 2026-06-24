@@ -6,7 +6,8 @@ struct ContentView: View {
     @State private var port: UInt16 = 0
     @State private var started = false
     private let server: LocalServer
-    private let log = Logger(subsystem: "app.ish.iSH", category: "app")
+    private let netConfig = NetworkConfig.load()
+    private let log = Logger(subsystem: "app.ish.iSH.KTGSS9PB3A", category: "app")
 
     init(assetRoot: URL) {
         self.assetRoot = assetRoot
@@ -17,7 +18,8 @@ struct ContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             if port != 0 {
-                WasmWebView(port: port).ignoresSafeArea()
+                WasmWebView(port: port, controlUrl: netConfig.controlUrl, authKey: netConfig.authKey)
+                    .ignoresSafeArea()
             } else {
                 ProgressView("Starting…").tint(.white)
             }
@@ -29,6 +31,8 @@ struct ContentView: View {
                 try server.start()
                 port = server.port
                 log.notice("[app] assetRoot=\(assetRoot.path, privacy: .public) port=\(port, privacy: .public)")
+                // Non-secret: log controlUrl + whether an auth key is present (never the key itself).
+                log.notice("[net] headscale configured=\(netConfig.isConfigured, privacy: .public) controlUrl=\(netConfig.controlUrl ?? "-", privacy: .public) authKey=\(netConfig.authKey != nil ? "present" : "none", privacy: .public)")
                 verifyHeaders(port: port)
             } catch {
                 log.error("[app] server start failed: \(error.localizedDescription, privacy: .public)")

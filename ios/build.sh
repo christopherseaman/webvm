@@ -1,13 +1,13 @@
 #!/bin/bash
 # Feasibility-spike build: stage web bundle -> generate Xcode project ->
 # build for the iOS Simulator -> install + launch on the booted simulator.
-# Logs from subsystem app.ish.iSH carry the crossOriginIsolated + boot trace.
+# Logs from subsystem app.ish.iSH.KTGSS9PB3A carry the crossOriginIsolated + boot trace.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-BUNDLE_ID="app.ish.iSH"
+BUNDLE_ID="app.ish.iSH.KTGSS9PB3A"
 SCHEME="WebVM"
 DERIVED="$SCRIPT_DIR/.build-xcode"
 SIM_NAME_DEFAULT="iPad Pro 11-inch (M5)"
@@ -48,4 +48,4 @@ open -a Simulator || true
 xcrun simctl launch "$UDID" "$BUNDLE_ID"
 
 echo "==> Launched $BUNDLE_ID. Capture the boot trace with:"
-echo "    xcrun simctl spawn $UDID log show --style compact --last 2m --predicate 'subsystem == \"app.ish.iSH\"'"
+echo "    xcrun simctl spawn $UDID log show --style compact --last 2m --predicate 'subsystem == \"app.ish.iSH.KTGSS9PB3A\"'"
