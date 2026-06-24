@@ -5,7 +5,7 @@ import { viteStaticCopy } from 'vite-plugin-static-copy';
 export default defineConfig({
 	resolve: {
 		alias: {
-			'/config_terminal': process.env.WEBVM_MODE == "github" ? 'config_github_terminal.js' : 'config_public_terminal.js',
+			'/config_terminal': process.env.WEBVM_MODE == "github" ? 'config_github_terminal.js' : (process.env.WEBVM_MODE == "ios" ? 'config_ios_terminal.js' : 'config_public_terminal.js'),
 			"@leaningtech/cheerpx": process.env.CX_URL ? process.env.CX_URL : "@leaningtech/cheerpx"
 		}
 	},

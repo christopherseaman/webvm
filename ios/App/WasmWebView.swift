@@ -1,0 +1,110 @@
+import SwiftUI
+import WebKit
+import os
+
+/// Full-screen WKWebView that loads the WebVM page from the loopback server.
+/// Stock WKWebViewConfiguration — crossOriginIsolated and the WASM JIT come for
+/// free inside WebKit; the only additions are a console->os_log bridge so the
+/// boot can be observed from native logs.
+struct WasmWebView: UIViewRepresentable {
+    let port: UInt16
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        cfg.userContentController.add(context.coordinator, name: "nativeLog")
+        cfg.userContentController.addUserScript(
+            WKUserScript(source: Coordinator.consoleBridge,
+                         injectionTime: .atDocumentStart,
+                         forMainFrameOnly: false))
+
+        let webView = WKWebView(frame: .zero, configuration: cfg)
+        webView.navigationDelegate = context.coordinator
+        #if DEBUG
+        webView.isInspectable = true
+        #endif
+        let url = URL(string: "http://127.0.0.1:\(port)/index.html")!
+        webView.load(URLRequest(url: url))
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+        private let log = Logger(subsystem: "app.ish.iSH", category: "webconsole")
+
+        /// Injected at document start: forwards console.* + errors to native,
+        /// reports the cross-origin-isolation env immediately, then ticks for
+        /// ~30s sampling crossOriginIsolated and the terminal's text so a boot
+        /// to a shell prompt is visible in os_log.
+        static let consoleBridge = #"""
+        (function () {
+          function ser(a) {
+            try { return (typeof a === 'object') ? JSON.stringify(a) : String(a); }
+            catch (e) { return String(a); }
+          }
+          function send(level, parts) {
+            try {
+              window.webkit.messageHandlers.nativeLog.postMessage({ level: level, msg: parts.join(' ') });
+            } catch (e) {}
+          }
+          ['log', 'info', 'warn', 'error', 'debug'].forEach(function (k) {
+            var orig = console[k] ? console[k].bind(console) : function () {};
+            console[k] = function () {
+              send(k, Array.prototype.slice.call(arguments).map(ser));
+              orig.apply(console, arguments);
+            };
+          });
+          window.addEventListener('error', function (e) {
+            send('error', ['window.onerror', e.message, '@', (e.filename || '') + ':' + (e.lineno || '')]);
+          });
+          window.addEventListener('unhandledrejection', function (e) {
+            send('error', ['unhandledrejection', ser(e.reason)]);
+          });
+          function env() {
+            return 'crossOriginIsolated=' + self.crossOriginIsolated +
+                   ' SAB=' + (typeof SharedArrayBuffer !== 'undefined') +
+                   ' WASM=' + (typeof WebAssembly !== 'undefined') +
+                   ' cores=' + (navigator.hardwareConcurrency || '?');
+          }
+          send('log', ['[ENV]', env()]);
+          var ticks = 0;
+          var iv = setInterval(function () {
+            ticks++;
+            var term = document.querySelector('.xterm-rows') ||
+                       document.querySelector('.xterm') ||
+                       document.querySelector('.terminal');
+            var txt = term ? (term.innerText || term.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240)
+                           : '(no terminal yet)';
+            send('log', ['[TICK ' + ticks + ']', env(), '| term:', txt]);
+            if (ticks >= 12) clearInterval(iv);
+          }, 2500);
+        })();
+        """#
+
+        func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard message.name == "nativeLog",
+                  let body = message.body as? [String: Any],
+                  let text = body["msg"] as? String else { return }
+            let level = (body["level"] as? String) ?? "log"
+            switch level {
+            case "error": log.error("[web] \(text, privacy: .public)")
+            case "warn":  log.warning("[web] \(text, privacy: .public)")
+            default:      log.notice("[web] \(text, privacy: .public)")
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            log.notice("[nav] didFinish \(webView.url?.absoluteString ?? "?", privacy: .public)")
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            log.error("[nav] didFail \(error.localizedDescription, privacy: .public)")
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            log.error("[nav] didFailProvisional \(error.localizedDescription, privacy: .public)")
+        }
+    }
+}
