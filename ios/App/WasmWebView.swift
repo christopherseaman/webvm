@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import UIKit
 import os
 
 /// Full-screen WKWebView that loads the WebVM page from the loopback server.
@@ -29,6 +30,10 @@ struct WasmWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
         cfg.userContentController.add(context.coordinator, name: "nativeLog")
+        // Paste bridge: WKWebView/iOS Safari only honors navigator.clipboard.readText()
+        // from a trusted system-paste gesture, not a scripted button tap — so a visible
+        // "Paste" button reads UIPasteboard directly instead.
+        cfg.userContentController.add(context.coordinator, name: "nativePaste")
         cfg.userContentController.addUserScript(
             WKUserScript(source: Coordinator.consoleBridge,
                          injectionTime: .atDocumentStart,
@@ -102,6 +107,12 @@ struct WasmWebView: UIViewRepresentable {
         """#
 
         func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "nativePaste" {
+                let text = UIPasteboard.general.string ?? ""
+                let encoded = (try? JSONEncoder().encode(text)).flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
+                message.webView?.evaluateJavaScript("window.__webvmPaste && window.__webvmPaste(\(encoded))")
+                return
+            }
             guard message.name == "nativeLog",
                   let body = message.body as? [String: Any],
                   let text = body["msg"] as? String else { return }

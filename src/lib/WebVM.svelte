@@ -185,6 +185,127 @@
 		if(display)
 			setScreenSize(display);
 	}
+	// OSC 52 (guest-initiated clipboard write, e.g. `vim` yank or a shell
+	// script doing `printf '\e]52;c;%s\a' "$(base64 <<<"$1")"`) is not
+	// implemented by xterm.js itself; this is a cheap, independent addition.
+	function registerOsc52(term)
+	{
+		term.parser.registerOscHandler(52, (data) => {
+			try
+			{
+				const b64 = data.split(";")[1] || "";
+				navigator.clipboard.writeText(atob(b64)).catch(() => {});
+			}
+			catch(e) {}
+			return true;
+		});
+	}
+	// Touch-based text selection: xterm.js's CSS sets user-select:none and its
+	// SelectionService only responds to real mousedown/mousemove/mouseup, so a
+	// long-press arms selection mode and re-dispatches touchmove as synthetic
+	// mouse events. Registered with {capture:true} because xterm.js's own
+	// touchstart/touchmove listeners (scroll-by-drag, on a descendant of
+	// #console) otherwise fire first on every bubble-phase event and would
+	// scroll the buffer out from under an in-progress selection.
+	function initTouchSelection(term)
+	{
+		if(!('ontouchstart' in window || navigator.maxTouchPoints > 0))
+			return;
+		const consoleDiv = document.getElementById("console");
+		const LONG_PRESS_MS = 450;
+		const MOVE_CANCEL_PX = 10;
+		let pressTimer = null, armed = false, startX = 0, startY = 0, copyBtn = null;
+
+		function dispatchMouse(type, touch)
+		{
+			const target = document.elementFromPoint(touch.clientX, touch.clientY) || consoleDiv;
+			target.dispatchEvent(new MouseEvent(type, {
+				bubbles: true, cancelable: true, composed: true,
+				button: 0, buttons: type === "mouseup" ? 0 : 1,
+				// xterm.js's SelectionService checks e.detail (1/2/3 = single/
+				// double/triple click) to pick _handleSingleClick vs. double/triple;
+				// a synthetic MouseEvent defaults detail to 0, which matches none
+				// of those branches and silently no-ops (no selectionStart is ever
+				// set). Force 1 (single-click / start-drag) on every dispatch.
+				detail: 1,
+				clientX: touch.clientX, clientY: touch.clientY
+			}));
+		}
+		function hideCopyButton() { if(copyBtn) { copyBtn.remove(); copyBtn = null; } }
+		function showCopyButton(touch)
+		{
+			hideCopyButton();
+			copyBtn = document.createElement("button");
+			copyBtn.className = "xterm-copy-btn";
+			copyBtn.textContent = "Copy";
+			copyBtn.style.left = touch.clientX + "px";
+			copyBtn.style.top = Math.max(touch.clientY - 44, 4) + "px";
+			copyBtn.addEventListener("click", (e) => {
+				e.preventDefault(); e.stopPropagation();
+				const text = term.getSelection();
+				if(text)
+					navigator.clipboard.writeText(text).catch(() => {});
+				hideCopyButton();
+			});
+			document.body.appendChild(copyBtn);
+		}
+
+		consoleDiv.addEventListener("touchstart", (e) => {
+			if(e.touches.length !== 1) return;
+			const touch = e.touches[0];
+			startX = touch.clientX; startY = touch.clientY; armed = false;
+			hideCopyButton();
+			clearTimeout(pressTimer);
+			pressTimer = setTimeout(() => { armed = true; dispatchMouse("mousedown", touch); }, LONG_PRESS_MS);
+		}, {capture: true, passive: true});
+
+		consoleDiv.addEventListener("touchmove", (e) => {
+			const touch = e.touches[0];
+			if(!armed)
+			{
+				if(Math.abs(touch.clientX - startX) > MOVE_CANCEL_PX || Math.abs(touch.clientY - startY) > MOVE_CANCEL_PX)
+					clearTimeout(pressTimer); // let xterm's own scroll handler own this gesture
+				return;
+			}
+			e.preventDefault(); e.stopPropagation();
+			dispatchMouse("mousemove", touch);
+		}, {capture: true, passive: false});
+
+		consoleDiv.addEventListener("touchend", (e) => {
+			clearTimeout(pressTimer);
+			if(armed)
+			{
+				dispatchMouse("mouseup", e.changedTouches[0]);
+				if(term.hasSelection())
+					showCopyButton(e.changedTouches[0]);
+				armed = false;
+			}
+		}, {capture: true, passive: true});
+	}
+	// Native paste: WKWebView/iOS Safari only grants navigator.clipboard.readText()
+	// during a trusted system-paste gesture, not a scripted button click, so the
+	// button posts to a native UIPasteboard bridge (ios/App/WasmWebView.swift)
+	// instead; outside WKWebView (desktop, Playwright) it falls back to the
+	// standard Clipboard API. Assigned onto window only from initTerminal()
+	// (client-only, via onMount) — this file's <script> body also runs during
+	// SvelteKit's SSR prerender, where `window` does not exist.
+	function webvmPaste(text)
+	{
+		term.paste(text);
+		term.focus();
+	}
+	function handlePasteButton()
+	{
+		if(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nativePaste)
+		{
+			window.webkit.messageHandlers.nativePaste.postMessage(null);
+		}
+		else
+		{
+			navigator.clipboard.readText().then(text => { term.paste(text); term.focus(); }).catch(e => console.log("paste failed: " + e));
+		}
+	}
+	const isTouchDevice = typeof window !== 'undefined' && ('ontouchstart' in window || navigator.maxTouchPoints > 0);
 	async function initTerminal()
 	{
 		const { Terminal } = await import('@xterm/xterm');
@@ -195,6 +316,7 @@
 		term.loadAddon(fitAddon);
 		var linkAddon = new WebLinksAddon();
 		term.loadAddon(linkAddon);
+		registerOsc52(term);
 		const consoleDiv = document.getElementById("console");
 		term.open(consoleDiv);
 		term.scrollToTop();
@@ -202,6 +324,8 @@
 		window.addEventListener("resize", handleResize);
 		term.focus();
 		term.onData(readData);
+		initTouchSelection(term);
+		window.__webvmPaste = webvmPaste;
 		// Avoid undesired default DnD handling
 		function preventDefaults (e) {
 			e.preventDefault()
@@ -326,6 +450,11 @@
 		cx.registerCallback("processCreated", handleProcessCreated);
 		term.scrollToBottom();
 		cxReadFunc = cx.setCustomConsole(writeData, term.cols, term.rows);
+			// Headless auto-connect: bring up Tailscale shortly AFTER the run loop
+			// starts (the UI "Connect" button is otherwise the only trigger, always
+			// tapped post-boot; calling networkLogin during boot froze the main thread).
+			if(configObj.netTransport !== "directsockets" && networkInterface.authKey)
+				setTimeout(() => { try { console.log("[net] tailscale auto-connect"); cx.networkLogin(); } catch(e) { console.warn("[net] networkLogin failed: " + e); } }, 5000);
 		const display = document.getElementById("display");
 		if(display)
 		{
@@ -388,5 +517,10 @@
 		{/if}
 		<div class="absolute top-0 bottom-0 {sideBarPinned ? 'left-[23.5rem]' : 'left-14'} right-0 p-1 scrollbar" id="console">
 		</div>
+		{#if isTouchDevice}
+			<button class="xterm-paste-btn" on:click={handlePasteButton} aria-label="Paste">
+				<i class="fas fa-paste"></i>
+			</button>
+		{/if}
 	</div>
 </main>
