@@ -34,6 +34,7 @@ function validateLoginUrl(url)
 
 function loginUrlCb(url)
 {
+	console.log("[net] tailscale loginUrlCb (interactive login requested — unexpected with an authKey)");
 	try
 	{
 		url = validateLoginUrl(url);
@@ -51,6 +52,7 @@ function loginUrlCb(url)
 
 function stateUpdateCb(state)
 {
+	console.log("[net] tailscale state=" + state);
 	switch(state)
 	{
 		case 6 /*Running*/:
@@ -73,6 +75,10 @@ function netmapUpdateCb(map)
 			break;
 		}
 	}
+	console.log("[net] tailscale netmap self=" + networkData.currentIp + " peers=" + map.peers.length + " exitNode=" + exitNodeFound);
+	// Exit-node selection is fully handled by the engine (tun.js's autoConf
+	// auto-selects the first peer with `online && exitNode` true) once the
+	// tailnet admin approves an exit node — no client-side override needed.
 	if(exitNodeFound)
 	{
 		exitNode.set(true);
@@ -183,7 +189,11 @@ export function updateButtonData(state, handleConnect) {
 	}
 }
 
-export const networkInterface = { authKey: authKey, controlUrl: controlUrl, loginUrlCb: loginUrlCb, stateUpdateCb: stateUpdateCb, netmapUpdateCb: netmapUpdateCb };
+// dnsIp: the resolver lwIP's dns_setserver points at. MagicDNS (100.100.100.100)
+// is answered locally by the tailscale client — it resolves tailnet names with NO
+// exit node, and forwards public names through the exit node (Mullvad) once one is
+// online. (1.1.1.1 would need egress for every query; 127.0.0.53 is a dead stub.)
+export const networkInterface = { authKey: authKey, controlUrl: controlUrl, dnsIp: "8.8.8.8", loginUrlCb: loginUrlCb, stateUpdateCb: stateUpdateCb, netmapUpdateCb: netmapUpdateCb };
 
 export const networkData = { currentIp: null, connectionState: connectionState, exitNode: exitNode, loginUrl: null, dashboardUrl: dashboardUrl }
 

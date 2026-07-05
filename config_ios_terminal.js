@@ -4,11 +4,13 @@
 // stays cross-origin isolated (required by CheerpX's SharedArrayBuffer).
 export const diskImageUrl = "/disk/debian_mini.ext2";
 export const diskImageType = "bytes";
-// Networking: tunnel guest TCP over a loopback WebSocket to the in-app native
-// NWConnection relay (the device IS the gateway — no Tailscale, no extra hops).
-// Served by the embedded LocalServer on the fixed port at /net.
-export const netTransport = "directsockets";
-export const netWs = "ws://127.0.0.1:47821/net";
+// Networking: no netTransport override here -> falls back to the default
+// Tailscale/lwIP networkInterface (src/lib/network.js). CheerpX's DirectSockets
+// networkInterface (device-direct, no Tailscale) cannot reliably wake a guest
+// recv() for unmodified tools (curl/apt/getent) — an engine limitation, not a
+// bug in this app — so general internet goes through Tailscale + an
+// admin-approved exit node instead. Tailscale auto-connects on boot
+// (WebVM.svelte) using the authKey baked from ios/.network.env at stage time.
 // Print an introduction message about the technology
 export const printIntro = true;
 // Is a graphical display needed
@@ -16,14 +18,11 @@ export const needsDisplay = false;
 // Executable full path (Required)
 export const cmd = "/bin/bash";
 // Arguments, as an array (Required)
-// Arguments, as an array (Required)
 export const args = ["--login"];
 // Optional extra parameters
 export const opts = {
-	// Environment variables. RES_OPTIONS=use-vc forces the resolver to use TCP
-	// (the DirectSockets relay carries TCP; UDP is not yet bridged), so hostname
-	// resolution works through the device when /etc/resolv.conf has a nameserver.
-	env: ["HOME=/home/user", "TERM=xterm", "USER=user", "SHELL=/bin/bash", "EDITOR=vim", "LANG=en_US.UTF-8", "LC_ALL=C", "RES_OPTIONS=use-vc"],
+	// Environment variables
+	env: ["HOME=/home/user", "TERM=xterm", "USER=user", "SHELL=/bin/bash", "EDITOR=vim", "LANG=en_US.UTF-8", "LC_ALL=C"],
 	// Current working directory
 	cwd: "/home/user",
 	// User id

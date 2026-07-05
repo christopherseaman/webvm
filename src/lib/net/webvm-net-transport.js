@@ -21,6 +21,8 @@ import {
   encodeFrame,
   decodeFrame,
   encodeConnectPayload,
+  encodeUdpPayload,
+  decodeUdpPayload,
 } from "./frame-codec.js";
 
 const STUB_LOCAL_ADDR = "127.0.0.1";
@@ -103,8 +105,15 @@ export class WebVMRawSocketTransport {
     return notImplementedSocket("TCPServerSocket: not implemented in MVP (per spec/03)");
   }
 
-  UDPSocket(_opts) {
-    return notImplementedSocket("UDPSocket: not implemented in MVP (per spec/03)");
+  UDPSocket(opts) {
+    if (!this._ws) {
+      return notImplementedSocket("UDPSocket called before _open()");
+    }
+    const connId = this._allocConnId();
+    const udp = new UdpConn(this, connId, (opts && opts.localPort) || 0);
+    this._conns.set(connId, udp);
+    this._send(encodeFrame(OP.UDP_OPEN, connId));
+    return udp.publicHandle();
   }
 
   _allocConnId() {
@@ -156,7 +165,10 @@ export class WebVMRawSocketTransport {
       return;
     }
     const conn = this._conns.get(frame.connId);
-    if (!conn) return;
+    if (!conn) {
+      console.warn(`[net] dropped frame op=${frame.op} connId=${frame.connId} (no matching connection)`);
+      return;
+    }
     conn._onFrame(frame);
   }
 
@@ -252,6 +264,80 @@ class Conn {
       this._readableController = null;
     }
     if (err) this._opened.reject(err);
+    this._closed.resolve();
+    this._transport._conns.delete(this._id);
+  }
+}
+
+// WHATWG UDPSocket (bound mode): opened resolves immediately; readable yields
+// { data, remoteAddress, remotePort }; writable accepts the same shape.
+class UdpConn {
+  constructor(transport, id, localPort) {
+    this._transport = transport;
+    this._id = id;
+    this._localPort = localPort || (49152 + (id & 0x3fff));
+    this._opened = new Deferred();
+    this._closed = new Deferred();
+    this._sentClose = false;
+    this._readableController = null;
+    this._readable = new ReadableStream({
+      start: (c) => { this._readableController = c; },
+      cancel: () => this._initiateClose(),
+    });
+    const self = this;
+    this._writable = new WritableStream({
+      write(msg) {
+        if (!msg || msg.remoteAddress == null || msg.remotePort == null) return;
+        const data = msg.data instanceof Uint8Array ? msg.data : new Uint8Array(msg.data || 0);
+        const family = looksLikeIPv6(msg.remoteAddress) ? FAMILY.IPV6 : FAMILY.IPV4;
+        self._transport._send(encodeFrame(OP.UDP_DATA, self._id,
+          encodeUdpPayload({ family, host: msg.remoteAddress, port: msg.remotePort, data })));
+      },
+      close() { self._initiateClose(); },
+      abort() { self._initiateClose(); },
+    });
+    // UDP has no handshake — open immediately.
+    this._opened.resolve({
+      readable: this._readable,
+      writable: this._writable,
+      localAddress: "0.0.0.0",
+      localPort: this._localPort,
+    });
+  }
+
+  publicHandle() {
+    return {
+      opened: this._opened.promise,
+      closed: this._closed.promise,
+      close: () => this._initiateClose(),
+    };
+  }
+
+  _onFrame(frame) {
+    if (frame.op === OP.UDP_DATA) {
+      try {
+        const { host, port, data } = decodeUdpPayload(frame.payload);
+        if (this._readableController) {
+          this._readableController.enqueue({ data, remoteAddress: host, remotePort: port });
+        }
+      } catch (e) { console.warn(`[net] UDP decode failed conn=${this._id}: ${e}`); }
+    } else if (frame.op === OP.UDP_CLOSE) {
+      this._teardown();
+    }
+  }
+
+  _initiateClose() {
+    if (this._sentClose) return;
+    this._sentClose = true;
+    this._transport._send(encodeFrame(OP.UDP_CLOSE, this._id));
+    this._teardown();
+  }
+
+  _teardown() {
+    if (this._readableController) {
+      try { this._readableController.close(); } catch {}
+      this._readableController = null;
+    }
     this._closed.resolve();
     this._transport._conns.delete(this._id);
   }

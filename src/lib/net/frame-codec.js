@@ -20,6 +20,9 @@ export const OP = Object.freeze({
   ACCEPT:      0x08,
   RESOLVE:     0x09,
   RESOLVE_OK:  0x0A,
+  UDP_OPEN:    0x10,
+  UDP_DATA:    0x11,
+  UDP_CLOSE:   0x12,
 });
 
 export const FAMILY = Object.freeze({ IPV4: 4, IPV6: 6 });
@@ -131,4 +134,47 @@ export function decodeConnectPayload(bytes) {
   }
   const port = readU16LE(v, portOffset);
   return { family, proto, host, port };
+}
+
+/**
+ * Encode a UDP datagram payload (UDP_DATA frame body), both directions.
+ * Layout: family(1) | addr_len(2 LE) | addr(N) | port(2 LE) | data(...).
+ */
+export function encodeUdpPayload({ family, host, port, data }) {
+  assertU8(family, "encodeUdpPayload.family");
+  assertU16(port, "encodeUdpPayload.port");
+  const hostBytes = utf8enc.encode(host);
+  if (hostBytes.byteLength > 0xffff) {
+    throw new Error(`encodeUdpPayload.host: too long (${hostBytes.byteLength})`);
+  }
+  const datagram = data instanceof Uint8Array ? data : new Uint8Array(data || 0);
+  const out = new Uint8Array(1 + 2 + hostBytes.byteLength + 2 + datagram.byteLength);
+  const v = viewOf(out);
+  writeU8(v, 0, family);
+  writeU16LE(v, 1, hostBytes.byteLength);
+  out.set(hostBytes, 3);
+  writeU16LE(v, 3 + hostBytes.byteLength, port);
+  out.set(datagram, 3 + hostBytes.byteLength + 2);
+  return out;
+}
+
+/** Decode a UDP datagram payload. */
+export function decodeUdpPayload(bytes) {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new Error("decodeUdpPayload: expected Uint8Array");
+  }
+  if (bytes.byteLength < 5) {
+    throw new Error(`decodeUdpPayload: short (${bytes.byteLength} < 5)`);
+  }
+  const v = viewOf(bytes);
+  const family = readU8(v, 0);
+  const hostLen = readU16LE(v, 1);
+  const dataStart = 3 + hostLen + 2;
+  if (bytes.byteLength < dataStart) {
+    throw new Error(`decodeUdpPayload: length mismatch (host_len=${hostLen})`);
+  }
+  const host = utf8dec.decode(bytes.subarray(3, 3 + hostLen));
+  const port = readU16LE(v, 3 + hostLen);
+  const data = bytes.slice(dataStart);
+  return { family, host, port, data };
 }

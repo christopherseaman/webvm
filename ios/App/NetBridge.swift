@@ -19,7 +19,12 @@ enum FrameOp: UInt8 {
     case connect = 0x01, data = 0x02, close = 0x03
     case connectOK = 0x04, connectErr = 0x05
     case listen = 0x06, listenOK = 0x07, accept = 0x08, resolve = 0x09, resolveOK = 0x0A
+    case udpOpen = 0x10, udpData = 0x11, udpClose = 0x12
 }
+
+/// A UDP datagram with its remote endpoint (UDP_DATA frame body, both directions).
+/// Layout: family(1) | addr_len(2 LE) | addr(N) | port(2 LE) | data(...).
+struct UdpDatagram { let host: String; let port: UInt16; let data: Data }
 
 struct ConnectPayload {
     enum Family: UInt8 { case ipv4 = 4, ipv6 = 6 }
@@ -83,6 +88,29 @@ enum FrameCodec {
         guard a.count == portStart + 2 else { throw FrameCodecError.badConnect }
         guard let host = String(bytes: a[4 ..< 4 + hostLen], encoding: .utf8) else { throw FrameCodecError.badUTF8 }
         return ConnectPayload(family: family, proto: proto, host: host, port: u16le(a, portStart))
+    }
+
+    static func encodeUdp(_ dg: UdpDatagram) -> Data {
+        let host = Array(dg.host.utf8)
+        var out = Data()
+        out.append(1)  // family marker (unused on receive)
+        appendU16LE(&out, UInt16(host.count))
+        out.append(contentsOf: host)
+        appendU16LE(&out, dg.port)
+        out.append(dg.data)
+        return out
+    }
+
+    static func decodeUdp(_ data: Data) throws -> UdpDatagram {
+        let a = [UInt8](data)
+        guard a.count >= 5 else { throw FrameCodecError.badConnect }
+        let hostLen = Int(u16le(a, 1))
+        let portStart = 3 + hostLen
+        guard a.count >= portStart + 2 else { throw FrameCodecError.badConnect }
+        guard let host = String(bytes: a[3 ..< 3 + hostLen], encoding: .utf8) else { throw FrameCodecError.badUTF8 }
+        let port = u16le(a, portStart)
+        let datagram = a.count > portStart + 2 ? Data(a[(portStart + 2)...]) : Data()
+        return UdpDatagram(host: host, port: port, data: datagram)
     }
 
     private static func appendU16LE(_ d: inout Data, _ v: UInt16) {
@@ -154,6 +182,10 @@ final class NetBridge {
 
     private let socket: Socket
     private let table = ConnectionTable()
+    // UDP is connectionless: one guest socket (conn_id) may reach many destinations,
+    // so keep an NWConnection(.udp) per (conn_id, "host:port").
+    private var udpConns: [UInt32: [String: NWConnection]] = [:]
+    private let udpLock = NSLock()
     private let workQueue = DispatchQueue(label: "app.ish.iSH.netbridge.work", attributes: .concurrent)
     private let sendQueue = DispatchQueue(label: "app.ish.iSH.netbridge.send")
 
@@ -177,6 +209,9 @@ final class NetBridge {
         case .close:   handleClose(id: frame.connID)
         case .listen:  sendErr(id: frame.connID, reason: "LISTEN not supported")
         case .resolve: sendErr(id: frame.connID, reason: "RESOLVE not supported")
+        case .udpOpen: break  // lazily create the UDP flow on first datagram
+        case .udpData: handleUdpData(id: frame.connID, payload: frame.payload)
+        case .udpClose: handleUdpClose(id: frame.connID)
         default:       break
         }
     }
@@ -251,6 +286,50 @@ final class NetBridge {
         }
     }
 
+    // MARK: - UDP (datagram bridge — primarily DNS)
+
+    private func handleUdpData(id: UInt32, payload: Data) {
+        let dg: UdpDatagram
+        do { dg = try FrameCodec.decodeUdp(payload) } catch { return }
+        guard let port = NWEndpoint.Port(rawValue: dg.port) else { return }
+        let key = "\(dg.host):\(dg.port)"
+        udpLock.lock()
+        var conns = udpConns[id] ?? [:]
+        let existing = conns[key]
+        if existing == nil {
+            let c = NWConnection(host: NWEndpoint.Host(dg.host), port: port, using: .udp)
+            conns[key] = c
+            udpConns[id] = conns
+            udpLock.unlock()
+            netLog.notice("UDP id=\(id) -> \(dg.host, privacy: .public):\(dg.port)")
+            c.stateUpdateHandler = { [weak self] state in
+                if case .ready = state { self?.startUdpReceiving(id: id, host: dg.host, port: dg.port, connection: c) }
+            }
+            c.start(queue: workQueue)
+            c.send(content: dg.data, completion: .idempotent)
+        } else {
+            udpLock.unlock()
+            existing?.send(content: dg.data, completion: .idempotent)
+        }
+    }
+
+    private func startUdpReceiving(id: UInt32, host: String, port: UInt16, connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, _, error in
+            guard let self = self else { return }
+            if let data = data, !data.isEmpty {
+                self.sendFrame(.udpData, id: id, payload: FrameCodec.encodeUdp(UdpDatagram(host: host, port: port, data: data)))
+            }
+            if error == nil { self.startUdpReceiving(id: id, host: host, port: port, connection: connection) }
+        }
+    }
+
+    private func handleUdpClose(id: UInt32) {
+        udpLock.lock()
+        let conns = udpConns.removeValue(forKey: id)
+        udpLock.unlock()
+        conns?.values.forEach { $0.cancel() }
+    }
+
     private func teardown(id: UInt32, sendCloseToGuest: Bool) {
         if sendCloseToGuest && table.markHostSentCloseIfNeeded(id: id) { sendClose(id: id) }
         table.remove(id: id)?.cancel()
@@ -268,6 +347,10 @@ final class NetBridge {
 
     private func shutdownAll() {
         for conn in table.removeAll() { conn.cancel() }
+        udpLock.lock()
+        let udp = udpConns; udpConns.removeAll()
+        udpLock.unlock()
+        for conns in udp.values { for c in conns.values { c.cancel() } }
     }
 }
 
