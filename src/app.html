@@ -2,7 +2,14 @@
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<!-- maximum-scale=1, user-scalable=no: the layout is a fixed, app-like
+		terminal UI (not a zoomable document — text size already adapts to the
+		viewport), and on iOS this also disables the native double-tap-to-zoom
+		gesture recognizer, which otherwise intercepts a double-tap-then-drag
+		gesture before it reaches touch-selection's JS handling. Desktop browser
+		zoom (Cmd+/-) is unaffected — these attributes only govern mobile pinch/
+		double-tap zoom. -->
+		<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 		<title>WebVM - Linux virtualization in WebAssembly</title>
 
 		<meta name="description" content="Linux virtual machine, running in the browser via HTML5/WebAssembly. Networking and graphics supported.">

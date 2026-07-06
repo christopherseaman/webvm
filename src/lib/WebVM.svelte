@@ -185,8 +185,20 @@
 		if(display)
 			setScreenSize(display);
 	}
-	// OSC 52 (guest-initiated clipboard write, e.g. `vim` yank or a shell
-	// script doing `printf '\e]52;c;%s\a' "$(base64 <<<"$1")"`) is not
+	// Write text to the system clipboard. In WKWebView navigator.clipboard.writeText()
+	// only succeeds under a user gesture, so a clipboard write NOT driven by a tap
+	// (the OSC 52 handler below, which fires from guest terminal output) must go
+	// through a native UIPasteboard bridge (ios/App/WasmWebView.swift's nativeCopy)
+	// instead; outside WKWebView (desktop, Playwright) it uses the Clipboard API.
+	function webvmCopy(text)
+	{
+		if(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nativeCopy)
+			window.webkit.messageHandlers.nativeCopy.postMessage(text);
+		else
+			navigator.clipboard.writeText(text).catch(() => {});
+	}
+	// OSC 52 (guest-initiated clipboard write, e.g. `vim` yank or the `yank`
+	// helper doing `printf '\e]52;c;%s\a' "$(base64 <<<"$1")"`) is not
 	// implemented by xterm.js itself; this is a cheap, independent addition.
 	function registerOsc52(term)
 	{
@@ -194,29 +206,42 @@
 			try
 			{
 				const b64 = data.split(";")[1] || "";
-				navigator.clipboard.writeText(atob(b64)).catch(() => {});
+				// atob yields a binary string; decode as UTF-8 so non-ASCII survives.
+				const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+				webvmCopy(new TextDecoder().decode(bytes));
 			}
 			catch(e) {}
 			return true;
 		});
 	}
 	// Touch-based text selection: xterm.js's CSS sets user-select:none and its
-	// SelectionService only responds to real mousedown/mousemove/mouseup, so a
-	// long-press arms selection mode and re-dispatches touchmove as synthetic
-	// mouse events. Registered with {capture:true} because xterm.js's own
-	// touchstart/touchmove listeners (scroll-by-drag, on a descendant of
-	// #console) otherwise fire first on every bubble-phase event and would
-	// scroll the buffer out from under an in-progress selection.
+	// SelectionService only responds to real mousedown/mousemove/mouseup, so
+	// touches are bridged to synthetic mouse events. A PLAIN single-tap-drag is
+	// deliberately left untouched (falls through to xterm's own touch-scroll) —
+	// single-drag is reserved for scrolling. Instead, a double-tap is detected
+	// here and its second touchdown is dispatched as a synthetic mousedown with
+	// detail:2, which xterm.js's SelectionService already treats as a
+	// double-click: it selects the word under the touch and switches to
+	// word-extend mode (_activeSelectionMode=1), so the drag that follows
+	// (still the same, unlifted finger) extends the selection by whole words —
+	// "double-tap and drag" word selection, with no long-press ambiguity.
+	// Registered with {capture:true} so this runs before xterm's own
+	// touchstart/touchmove (scroll-by-drag, on a descendant of #console), which
+	// would otherwise fire first and scroll the buffer out from under a
+	// double-tap-triggered selection.
 	function initTouchSelection(term)
 	{
 		if(!('ontouchstart' in window || navigator.maxTouchPoints > 0))
 			return;
 		const consoleDiv = document.getElementById("console");
-		const LONG_PRESS_MS = 450;
-		const MOVE_CANCEL_PX = 10;
-		let pressTimer = null, armed = false, startX = 0, startY = 0, copyBtn = null;
+		const DOUBLE_TAP_MS = 300;
+		const DOUBLE_TAP_PX = 30;
+		const TAP_MAX_MOVE_PX = 10;
+		let armed = false, touchStartX = 0, touchStartY = 0;
+		let lastTapTime = 0, lastTapX = 0, lastTapY = 0;
+		let copyBtn = null;
 
-		function dispatchMouse(type, touch)
+		function dispatchMouse(type, touch, detail)
 		{
 			const target = document.elementFromPoint(touch.clientX, touch.clientY) || consoleDiv;
 			target.dispatchEvent(new MouseEvent(type, {
@@ -225,9 +250,9 @@
 				// xterm.js's SelectionService checks e.detail (1/2/3 = single/
 				// double/triple click) to pick _handleSingleClick vs. double/triple;
 				// a synthetic MouseEvent defaults detail to 0, which matches none
-				// of those branches and silently no-ops (no selectionStart is ever
-				// set). Force 1 (single-click / start-drag) on every dispatch.
-				detail: 1,
+				// of those branches and silently no-ops. detail:2 is what makes
+				// this a double-click (word) selection in xterm's eyes.
+				detail: detail,
 				clientX: touch.clientX, clientY: touch.clientY
 			}));
 		}
@@ -244,41 +269,61 @@
 				e.preventDefault(); e.stopPropagation();
 				const text = term.getSelection();
 				if(text)
-					navigator.clipboard.writeText(text).catch(() => {});
+					webvmCopy(text);
+				term.clearSelection();
 				hideCopyButton();
 			});
 			document.body.appendChild(copyBtn);
 		}
 
 		consoleDiv.addEventListener("touchstart", (e) => {
-			if(e.touches.length !== 1) return;
+			if(e.touches.length !== 1) { armed = false; return; }
 			const touch = e.touches[0];
-			startX = touch.clientX; startY = touch.clientY; armed = false;
-			hideCopyButton();
-			clearTimeout(pressTimer);
-			pressTimer = setTimeout(() => { armed = true; dispatchMouse("mousedown", touch); }, LONG_PRESS_MS);
-		}, {capture: true, passive: true});
+			touchStartX = touch.clientX; touchStartY = touch.clientY;
+			const now = e.timeStamp;
+			const isDoubleTap = (now - lastTapTime) < DOUBLE_TAP_MS &&
+				Math.hypot(touchStartX - lastTapX, touchStartY - lastTapY) < DOUBLE_TAP_PX;
+			if(isDoubleTap)
+			{
+				e.preventDefault(); e.stopPropagation();
+				armed = true;
+				hideCopyButton();
+				dispatchMouse("mousedown", touch, 2);
+				lastTapTime = 0; // consumed — a 3rd quick tap starts a fresh pair, not another double
+			}
+			else
+			{
+				armed = false;
+			}
+		}, {capture: true, passive: false});
 
 		consoleDiv.addEventListener("touchmove", (e) => {
-			const touch = e.touches[0];
 			if(!armed)
-			{
-				if(Math.abs(touch.clientX - startX) > MOVE_CANCEL_PX || Math.abs(touch.clientY - startY) > MOVE_CANCEL_PX)
-					clearTimeout(pressTimer); // let xterm's own scroll handler own this gesture
-				return;
-			}
+				return; // not a recognized double-tap-drag — leave xterm's own scroll handling alone
+			const touch = e.touches[0];
 			e.preventDefault(); e.stopPropagation();
-			dispatchMouse("mousemove", touch);
+			dispatchMouse("mousemove", touch, 2);
 		}, {capture: true, passive: false});
 
 		consoleDiv.addEventListener("touchend", (e) => {
-			clearTimeout(pressTimer);
+			const touch = e.changedTouches[0];
 			if(armed)
 			{
-				dispatchMouse("mouseup", e.changedTouches[0]);
+				dispatchMouse("mouseup", touch, 2);
 				if(term.hasSelection())
-					showCopyButton(e.changedTouches[0]);
+					showCopyButton(touch);
 				armed = false;
+				lastTapTime = 0;
+			}
+			else if(Math.hypot(touch.clientX - touchStartX, touch.clientY - touchStartY) < TAP_MAX_MOVE_PX)
+			{
+				// a genuine tap (not a drag/scroll) — remember it as the first half
+				// of a possible double-tap
+				lastTapTime = e.timeStamp; lastTapX = touch.clientX; lastTapY = touch.clientY;
+			}
+			else
+			{
+				lastTapTime = 0; // was a drag/scroll, doesn't count toward double-tap timing
 			}
 		}, {capture: true, passive: true});
 	}

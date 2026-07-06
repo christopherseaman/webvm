@@ -1,0 +1,15 @@
+#!/bin/sh
+# yank — copy stdin (or a file argument) to the host system clipboard via the
+# OSC 52 terminal escape sequence. WebVM's terminal (xterm.js) has an OSC 52
+# handler that forwards the payload to navigator.clipboard, so this works with
+# no external tools. A subset of the cross-platform yank() (no macOS pbcopy /
+# tmux / zellij branches, since the guest is a bare Linux terminal).
+#   usage:  <command> | yank        # copy a command's output
+#           yank <file>             # copy a file's contents
+if [ -n "$1" ] && [ -f "$1" ]; then
+	content=$(cat "$1")
+else
+	content=$(cat)
+fi
+b64=$(printf '%s' "$content" | base64 | tr -d '\n')
+printf '\033]52;c;%s\007' "$b64"

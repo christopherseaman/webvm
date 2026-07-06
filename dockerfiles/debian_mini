@@ -17,6 +17,11 @@ RUN apt-get -y install apt-utils gcc \
 RUN useradd -m user && echo "user:password" | chpasswd
 COPY --chown=user:user ./examples /home/user/examples
 RUN chmod -R +x  /home/user/examples/lua
+# `yank` — copy stdin/a file to the host clipboard via OSC 52 (for the
+# `command | yank` capture workflow; WebVM's terminal forwards OSC 52 to the
+# system clipboard). rootfs/ mirrors the guest filesystem layout.
+COPY ./rootfs/usr/local/bin/yank /usr/local/bin/yank
+RUN chmod 755 /usr/local/bin/yank
 # We set WORKDIR, as this gets extracted by Webvm to be used as the cwd. This is optional.
 WORKDIR /home/user/
 # We set env, as this gets extracted by Webvm. This is optional.

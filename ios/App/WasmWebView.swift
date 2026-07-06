@@ -34,6 +34,10 @@ struct WasmWebView: UIViewRepresentable {
         // from a trusted system-paste gesture, not a scripted button tap — so a visible
         // "Paste" button reads UIPasteboard directly instead.
         cfg.userContentController.add(context.coordinator, name: "nativePaste")
+        // Copy bridge: navigator.clipboard.writeText() likewise needs a user gesture in
+        // WKWebView. The OSC 52 handler (guest `yank`) fires from terminal output, not a
+        // gesture, so it writes to UIPasteboard directly through this instead.
+        cfg.userContentController.add(context.coordinator, name: "nativeCopy")
         cfg.userContentController.addUserScript(
             WKUserScript(source: Coordinator.consoleBridge,
                          injectionTime: .atDocumentStart,
@@ -41,6 +45,15 @@ struct WasmWebView: UIViewRepresentable {
 
         let webView = WKWebView(frame: .zero, configuration: cfg)
         webView.navigationDelegate = context.coordinator
+        // WKWebView wraps its content in its own native UIScrollView, independent
+        // of CSS overflow — its default pan/bounce drags the ENTIRE rendered
+        // surface (nav header included, since that's a native scrollView offset,
+        // not document-level CSS scrolling), which fights xterm.js's own
+        // JS-driven terminal scroll and our touch-selection bridge. Disable it so
+        // touch/drag gestures are handled exclusively by the web content's own
+        // JS, matching a native-app viewport rather than a scrollable page.
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.bounces = false
         #if DEBUG
         webView.isInspectable = true
         #endif
@@ -111,6 +124,12 @@ struct WasmWebView: UIViewRepresentable {
                 let text = UIPasteboard.general.string ?? ""
                 let encoded = (try? JSONEncoder().encode(text)).flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
                 message.webView?.evaluateJavaScript("window.__webvmPaste && window.__webvmPaste(\(encoded))")
+                return
+            }
+            if message.name == "nativeCopy" {
+                if let text = message.body as? String {
+                    UIPasteboard.general.string = text
+                }
                 return
             }
             guard message.name == "nativeLog",
