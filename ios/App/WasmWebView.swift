@@ -59,18 +59,6 @@ struct WasmWebView: UIViewRepresentable {
         // debug on-device-only behavior like native touch selection. Revert to
         // `#if DEBUG` before any non-research release.
         webView.isInspectable = true
-        // PHASE-1 de-risk spike (Approach B native selection): a native pan
-        // recognizer drives xterm's selection via __webvmDragSelect, to verify on
-        // a REAL device that (a) a native pan SURVIVES WKWebView's own recognizers
-        // for a sustained multi-move drag (w-shell's historical #1 failure), and
-        // (b) term.select paints the highlight and it holds. Coexists with the
-        // web content's recognizers via shouldRecognizeSimultaneouslyWith.
-        let selectPan = UIPanGestureRecognizer(target: context.coordinator,
-                                               action: #selector(Coordinator.handleSelectPan(_:)))
-        selectPan.minimumNumberOfTouches = 1
-        selectPan.maximumNumberOfTouches = 1
-        selectPan.delegate = context.coordinator
-        webView.addGestureRecognizer(selectPan)
         let frag = Self.fragment(controlUrl: controlUrl, authKey: authKey)
         let url = URL(string: "http://127.0.0.1:\(port)/index.html\(frag)")!
         webView.load(URLRequest(url: url))
@@ -79,37 +67,8 @@ struct WasmWebView: UIViewRepresentable {
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
-    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, UIGestureRecognizerDelegate {
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         private let log = Logger(subsystem: "app.ish.iSH.KTGSS9PB3A", category: "webconsole")
-
-        // PHASE-1 de-risk spike (Approach B): a native pan drives xterm selection.
-        private var panStart: CGPoint = .zero
-        private var panMoves = 0
-
-        @objc func handleSelectPan(_ gr: UIPanGestureRecognizer) {
-            guard let wv = gr.view as? WKWebView else { return }
-            let p = gr.location(in: wv)
-            switch gr.state {
-            case .began:
-                panStart = p; panMoves = 0
-                log.notice("[sel-b] pan BEGAN @\(Int(p.x)),\(Int(p.y))")
-            case .changed:
-                panMoves += 1
-                let js = "window.__webvmDragSelect && window.__webvmDragSelect(\(panStart.x),\(panStart.y),\(p.x),\(p.y))"
-                wv.evaluateJavaScript(js)
-                if panMoves <= 3 || panMoves % 15 == 0 {
-                    log.notice("[sel-b] pan CHANGED #\(self.panMoves) @\(Int(p.x)),\(Int(p.y))")
-                }
-            case .ended:
-                log.notice("[sel-b] pan ENDED after \(self.panMoves) moves (survived=\(self.panMoves > 1))")
-            case .cancelled, .failed:
-                log.error("[sel-b] pan \(gr.state == .cancelled ? "CANCELLED" : "FAILED") after \(self.panMoves) moves — WKWebView stole the drag")
-            default: break
-            }
-        }
-
-        // Coexist with WKWebView's own recognizers instead of being blocked by them.
-        func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 
         /// Injected at document start: forwards console.* + errors to native,
         /// reports the cross-origin-isolation env immediately, then ticks for

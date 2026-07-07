@@ -230,39 +230,100 @@
 			/AppleWebKit/.test(ua) && !/Android/i.test(ua);
 		if(!isAppleTouch || !term.element)
 			return;
+		const consoleDiv = document.getElementById("console");
 		const screenEl = term.element.querySelector('.xterm-screen');
 		const rowsEl = term.element.querySelector('.xterm-rows');
-		if(!screenEl || !rowsEl)
+		if(!consoleDiv || !screenEl || !rowsEl)
 			return;
-		// Map a viewport point (CSS px == UIView points; no page zoom) to an
-		// ABSOLUTE buffer cell {col,row}. Cell width uses term.cols, NOT text
-		// length (a past bug). row = viewportY (ydisp) + visible row.
+		const DOUBLE_TAP_MS = 300, DOUBLE_TAP_PX = 30, TAP_MOVE_PX = 10;
+		let lastTapTime = 0, lastTapX = 0, lastTapY = 0;
+		let armed = false, startX = 0, startY = 0;
+		let anchor = null;   // the double-tapped word {startCol,startRow,endCol,endRow} — fixed extend anchor
+
+		// Viewport point (CSS px == UIView points; no page zoom) -> ABSOLUTE buffer
+		// cell {col,row}. Cell width uses term.cols, NOT text length (a past bug).
 		function cellAt(px, py)
 		{
 			const scr = screenEl.getBoundingClientRect();
 			const rr = rowsEl.getBoundingClientRect();
 			const cw = rr.width / term.cols;
 			const ch = rr.height / term.rows;
-			let col = Math.floor((px - scr.left) / cw);
-			let vrow = Math.floor((py - scr.top) / ch);
-			col = Math.max(0, Math.min(term.cols - 1, col));
-			vrow = Math.max(0, Math.min(term.rows - 1, vrow));
+			const col = Math.max(0, Math.min(term.cols - 1, Math.floor((px - scr.left) / cw)));
+			const vrow = Math.max(0, Math.min(term.rows - 1, Math.floor((py - scr.top) / ch)));
 			return { col: col, row: term.buffer.active.viewportY + vrow };
 		}
-		// PHASE-1 de-risk bridge: the native pan forwards two viewport points; set
-		// the terminal selection between them (order-normalized, end-inclusive).
-		// The full build replaces this with per-handle setSelection calls.
-		window.__webvmDragSelect = (x0, y0, x1, y1) => {
-			let a = cellAt(x0, y0), b = cellAt(x1, y1);
+		// Whitespace-delimited word bounds around (col) on the buffer line.
+		function wordAt(col, row)
+		{
+			const line = term.buffer.active.getLine(row);
+			const s = line ? line.translateToString(true) : "";
+			const isWord = (ch) => !!ch && !/\s/.test(ch);
+			if(!isWord(s[col]))
+				return { startCol: col, endCol: col };
+			let a = col, b = col;
+			while(a > 0 && isWord(s[a - 1])) a--;
+			while(b < s.length - 1 && isWord(s[b + 1])) b++;
+			return { startCol: a, endCol: b };
+		}
+		// Select [a..b] inclusive via term.select (length spans rows). No synthetic
+		// mouse events — this is why it works on iOS where the old bridge did not.
+		function selectRange(a, b)
+		{
 			if(b.row < a.row || (b.row === a.row && b.col < a.col)) { const t = a; a = b; b = t; }
 			const len = (b.row - a.row) * term.cols + (b.col - a.col) + 1;
 			if(len <= 0) { term.clearSelection(); return; }
 			term.select(a.col, a.row, len);
-		};
-		window.__webvmSelectionText = () => term.getSelection();   // wrap-aware natively
-		window.__webvmClearSelection = () => term.clearSelection();
-		window.__webvmHasSelection = () => term.hasSelection();
-		console.log("[sel-b] native-handle bridge ready (Approach B, phase-1 spike)");
+		}
+
+		// Double-tap -> select the word and arm the drag to extend it. A plain
+		// single-tap-drag is left untouched so it falls through to xterm's scroll.
+		consoleDiv.addEventListener("touchstart", (e) => {
+			if(e.touches.length !== 1) { armed = false; return; }
+			const t = e.touches[0];
+			startX = t.clientX; startY = t.clientY;
+			const now = e.timeStamp;
+			const isDouble = (now - lastTapTime) < DOUBLE_TAP_MS &&
+				Math.hypot(startX - lastTapX, startY - lastTapY) < DOUBLE_TAP_PX;
+			if(isDouble)
+			{
+				e.preventDefault(); e.stopPropagation();
+				armed = true;
+				const c = cellAt(startX, startY);
+				const w = wordAt(c.col, c.row);
+				anchor = { startCol: w.startCol, startRow: c.row, endCol: w.endCol, endRow: c.row };
+				selectRange({ col: anchor.startCol, row: anchor.startRow }, { col: anchor.endCol, row: anchor.endRow });
+				lastTapTime = 0;
+				console.log("[sel] double-tap word select armed");
+			}
+			else { armed = false; }
+		}, { capture: true, passive: false });
+
+		// While armed, extend from the anchor WORD out to the finger cell.
+		consoleDiv.addEventListener("touchmove", (e) => {
+			if(!armed) return;   // plain single-drag -> xterm's own touch-scroll
+			e.preventDefault(); e.stopPropagation();
+			const c = cellAt(e.touches[0].clientX, e.touches[0].clientY);
+			const lo = { col: anchor.startCol, row: anchor.startRow };
+			const hi = { col: anchor.endCol, row: anchor.endRow };
+			const a = (c.row < lo.row || (c.row === lo.row && c.col < lo.col)) ? c : lo;
+			const b = (c.row > hi.row || (c.row === hi.row && c.col > hi.col)) ? c : hi;
+			selectRange(a, b);
+		}, { capture: true, passive: false });
+
+		consoleDiv.addEventListener("touchend", (e) => {
+			const t = e.changedTouches[0];
+			if(armed) { armed = false; }
+			else if(Math.hypot(t.clientX - startX, t.clientY - startY) < TAP_MOVE_PX)
+			{
+				lastTapTime = e.timeStamp; lastTapX = t.clientX; lastTapY = t.clientY;   // first half of a double-tap
+			}
+			else { lastTapTime = 0; }   // was a drag/scroll
+		}, { capture: true, passive: true });
+
+		// Bridge for the copy affordance + the handles increment.
+		window.__webvmSelectionText = () => term.getSelection();
+		window.__webvmClearSelection = () => { term.clearSelection(); };
+		console.log("[sel] double-tap-drag word selection ready (JS + term.select, increment 1)");
 	}
 	// Reconstruct clipboard text for the current NATIVE DOM selection over the
 	// terminal rows, mirroring xterm's SelectionService `get selectionText()`:
