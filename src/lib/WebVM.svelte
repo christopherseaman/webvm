@@ -442,9 +442,21 @@
 			if(lines) { term.scrollLines(lines); e.preventDefault(); }
 		}, { passive: false });
 
+		// Native trackpad/wheel scroll bridge: the disabled WKWebView scrollView eats
+		// the web `wheel` event, so iOS forwards the indirect-scroll point delta here
+		// (WasmWebView.swift's 0-touch pan). Accumulate to whole lines. term.scrollLines
+		// is signed: negative = toward scrollback. Flip the sign here if it feels inverted.
+		let wheelAccum = 0;
+		window.__webvmWheelScroll = (dy) => {
+			if(dragging || armed) return;
+			wheelAccum += dy;
+			const ch = metrics().ch || 17;
+			const lines = Math.trunc(wheelAccum / ch);
+			if(lines !== 0) { wheelAccum -= lines * ch; term.scrollLines(-lines); }
+		};
 		window.__webvmSelectionText = () => term.getSelection();
 		window.__webvmClearSelection = () => { term.clearSelection(); hideUI(); };
-		console.log("[sel] selection + handles + Copy ready (increment 3: pointer drag + end-handle fix)");
+		console.log("[sel] selection + handles + Copy + trackpad-scroll ready");
 	}
 	// Reconstruct clipboard text for the current NATIVE DOM selection over the
 	// terminal rows, mirroring xterm's SelectionService `get selectionText()`:

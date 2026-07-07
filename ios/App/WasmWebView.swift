@@ -59,6 +59,19 @@ struct WasmWebView: UIViewRepresentable {
         // debug on-device-only behavior like native touch selection. Revert to
         // `#if DEBUG` before any non-research release.
         webView.isInspectable = true
+        // Two-finger TRACKPAD scroll never reaches the web content as a `wheel`
+        // event (the disabled scrollView above eats it), so the terminal wouldn't
+        // scroll with a trackpad. iPadOS delivers indirect (trackpad/mouse-wheel)
+        // scroll as a 0-TOUCH pan via allowedScrollTypesMask — a different channel
+        // from touch pans, so it doesn't fight the web content's touch gestures
+        // (w-shell / Geistty pattern). Forward its delta to xterm's scrollLines.
+        let wheel = UIPanGestureRecognizer(target: context.coordinator,
+                                           action: #selector(Coordinator.handleScrollPan(_:)))
+        wheel.allowedScrollTypesMask = [.continuous, .discrete]
+        wheel.minimumNumberOfTouches = 0
+        wheel.maximumNumberOfTouches = 0        // trackpad scrolls aren't touches
+        wheel.delegate = context.coordinator
+        webView.addGestureRecognizer(wheel)
         let frag = Self.fragment(controlUrl: controlUrl, authKey: authKey)
         let url = URL(string: "http://127.0.0.1:\(port)/index.html\(frag)")!
         webView.load(URLRequest(url: url))
@@ -67,8 +80,27 @@ struct WasmWebView: UIViewRepresentable {
 
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
-    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, UIGestureRecognizerDelegate {
         private let log = Logger(subsystem: "app.ish.iSH.KTGSS9PB3A", category: "webconsole")
+
+        // Trackpad/wheel scroll -> xterm. The pan translation is cumulative and the
+        // system pre-applies the natural-scroll preference, so we forward the
+        // incremental delta each .changed and let the web side accumulate to lines.
+        private var lastScrollY: CGFloat = 0
+        @objc func handleScrollPan(_ gr: UIPanGestureRecognizer) {
+            guard let wv = gr.view as? WKWebView else { return }
+            switch gr.state {
+            case .began:
+                lastScrollY = gr.translation(in: wv).y
+            case .changed:
+                let y = gr.translation(in: wv).y
+                let dy = y - lastScrollY
+                lastScrollY = y
+                if dy != 0 { wv.evaluateJavaScript("window.__webvmWheelScroll && window.__webvmWheelScroll(\(Double(dy)))") }
+            default: break
+            }
+        }
+        func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 
         /// Injected at document start: forwards console.* + errors to native,
         /// reports the cross-origin-isolation env immediately, then ticks for
