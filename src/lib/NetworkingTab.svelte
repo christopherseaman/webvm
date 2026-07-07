@@ -1,5 +1,5 @@
 <script>
-	import { networkData, startLogin, updateButtonData } from '$lib/network.js'
+	import { networkData, startLogin, updateButtonData, beginConnect } from '$lib/network.js'
 	import { createEventDispatcher } from 'svelte';
 	import PanelButton from './PanelButton.svelte';
 	var dispatch = createEventDispatcher();
@@ -7,7 +7,7 @@
 	var exitNode = networkData.exitNode;
 
 	function handleConnect() {
-		connectionState.set("DOWNLOADING");
+		beginConnect();          // sets DOWNLOADING + arms the connect watchdog
 		dispatch('connect');
 	}
 

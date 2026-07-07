@@ -6,7 +6,7 @@
 	import '$lib/global.css';
 	import '@xterm/xterm/css/xterm.css'
 	import '@fortawesome/fontawesome-free/css/all.min.css'
-	import { networkInterface, startLogin } from '$lib/network.js'
+	import { networkInterface, startLogin, beginConnect } from '$lib/network.js'
 	import { WebVMRawSocketTransport } from '$lib/net/webvm-net-transport.js'
 	import { cpuActivity, diskActivity, cpuPercentage, diskLatency } from '$lib/activities.js'
 	import { introMessage, errorMessage, unexpectedErrorMessage } from '$lib/messages.js'
@@ -214,197 +214,115 @@
 			return true;
 		});
 	}
-	// Touch-based text selection: xterm.js's CSS sets user-select:none and its
-	// SelectionService only responds to real mousedown/mousemove/mouseup, so
-	// touches are bridged to synthetic mouse events. A PLAIN single-tap-drag is
-	// deliberately left untouched (falls through to xterm's own touch-scroll) —
-	// single-drag is reserved for scrolling. A double-tap is detected here and
-	// its second touchdown is dispatched as a synthetic mousedown with
-	// detail:2, which xterm.js's SelectionService already treats as a
-	// double-click: it selects the word under the touch and switches to
-	// word-extend mode (_activeSelectionMode=1), so the drag that follows
-	// (still the same, unlifted finger) extends the selection by whole words —
-	// "double-tap and drag" word selection, with no long-press ambiguity.
-	//
-	// Two iOS WebKit behaviors (both confirmed with raw-event traces on real
-	// WebKit, iPadOS 26 simulator) dictate the shape of the implementation:
-	// 1. Dispatching a synthetic mousedown while a touch sequence is in flight
-	//    MUTES that touch sequence: no further touchmove/touchend/touchcancel
-	//    is delivered for the finger. The parallel POINTER stream keeps
-	//    flowing with full coordinates, so the armed drag is driven from
-	//    pointermove/pointerup (document-level), never from touch events.
-	// 2. Every tap whose touchstart was not preventDefault'ed produces a
-	//    DELAYED "compatibility" mouse burst (mousemove, mousedown detail:1,
-	//    mouseup, click) — typically ~50ms-1s later, seconds under CheerpX
-	//    load. The FIRST tap of a double-tap cannot be preventDefault'ed (it
-	//    is not yet known to be one), so its burst can land mid-drag or after
-	//    the selection completed, where xterm would treat mousedown detail:1
-	//    as a fresh single-click (destroying the selection) and mouseup as
-	//    end-of-drag (detaching its document listeners). Trusted mouse events
-	//    over the terminal are therefore swallowed while a touch selection is
-	//    armed and for a grace period afterwards.
-	// Registered with {capture:true} so these run before xterm's own
-	// touchstart/touchmove (scroll-by-drag, on a descendant of #console), which
-	// would otherwise fire first and scroll the buffer out from under a
-	// double-tap-triggered selection.
-	function initTouchSelection(term)
+	// iOS/iPadOS native touch selection (Approach A). The old approach bridged
+	// touch to synthetic mouse events to drive xterm's mouse-only SelectionService;
+	// it worked on the Mac-hosted simulator but NOT on real iOS WebKit. Instead,
+	// let WKWebView's own long-press -> magnifier loupe -> drag handles -> system
+	// Copy callout select the DOM row text directly. enableNativeTouchSelection
+	// re-enables user-select on the rendered rows (via a CSS class) and installs a
+	// wrap-aware `copy` interceptor so soft-wrapped commands/paths round-trip.
+	function enableNativeTouchSelection(term)
 	{
-		if(!('ontouchstart' in window || navigator.maxTouchPoints > 0))
+		const ua = navigator.userAgent;
+		// Apple touch devices (iPad/iPhone), for BOTH finger and trackpad/mouse
+		// cursor. Excludes desktop (xterm's own mouse selection) and Android.
+		const isAppleTouch = (navigator.maxTouchPoints > 0 ||
+			window.matchMedia('(hover: none) and (pointer: coarse)').matches) &&
+			/AppleWebKit/.test(ua) && !/Android/i.test(ua);
+		if(!isAppleTouch || !term.element)
 			return;
-		const consoleDiv = document.getElementById("console");
-		const DOUBLE_TAP_MS = 300;
-		const DOUBLE_TAP_PX = 30;
-		const TAP_MAX_MOVE_PX = 10;
-		const COMPAT_MOUSE_GRACE_MS = 5000;
-		let armed = false, touchStartX = 0, touchStartY = 0;
-		let lastTapTime = 0, lastTapX = 0, lastTapY = 0;
-		let swallowTrustedMouseUntil = 0;
-		let copyBtn = null;
-
-		function dispatchMouse(type, touch, detail)
+		term.element.classList.add('xterm-native-touch-selection');
+		console.log("[sel] native touch selection enabled (Approach A): user-select:text on .xterm-rows");
+		// Wrap-aware copy: a raw DOM copy emits one <div> per VISUAL row, so a
+		// soft-wrapped logical line gets spurious newlines. Reconstruct logical
+		// lines from xterm's buffer model instead. xterm's own `copy` listener
+		// early-returns on an empty MODEL selection (a native DOM selection is
+		// always empty in the model), so it never fights this one. Capture phase.
+		document.addEventListener("copy", (e) => {
+			const text = normalizedTerminalSelection(term);
+			if(!text)
+				return;                              // not our selection: default copy
+			e.preventDefault();
+			if(e.clipboardData)
+				e.clipboardData.setData("text/plain", text);
+			webvmCopy(text);                          // unify native UIPasteboard + OSC-52
+		}, true);
+		window.__webvmNormalizedSelection = () => normalizedTerminalSelection(term);
+	}
+	// Reconstruct clipboard text for the current NATIVE DOM selection over the
+	// terminal rows, mirroring xterm's SelectionService `get selectionText()`:
+	// soft-wrap continuation rows (buffer line .isWrapped) join WITHOUT a newline.
+	function normalizedTerminalSelection(term)
+	{
+		const sel = document.getSelection();
+		if(!sel || sel.rangeCount === 0 || sel.isCollapsed)
+			return "";
+		const range = sel.getRangeAt(0);                       // document order
+		const rows = term.element && term.element.querySelector(".xterm-rows");
+		if(!rows || !rows.contains(range.startContainer) || !rows.contains(range.endContainer))
+			return "";
+		const startRowEl = rowElementFor(range.startContainer, range.startOffset, rows);
+		const endRowEl   = rowElementFor(range.endContainer, range.endOffset, rows);
+		if(!startRowEl || !endRowEl)
+			return "";
+		const viewportY = term.buffer.active.viewportY;        // == ydisp (DomRenderer row loop)
+		const kids = rows.children;
+		const sRow = Array.prototype.indexOf.call(kids, startRowEl) + viewportY;
+		const eRow = Array.prototype.indexOf.call(kids, endRowEl)   + viewportY;
+		const sCol = columnBefore(startRowEl, range.startContainer, range.startOffset);
+		const eCol = columnBefore(endRowEl,   range.endContainer,   range.endOffset);
+		return joinBufferSelection(term, sRow, sCol, eRow, eCol);
+	}
+	// The direct child of .xterm-rows containing `node` (or the child at `offset`
+	// when the Range endpoint is the rows container itself).
+	function rowElementFor(node, offset, rows)
+	{
+		if(node === rows)
+			return rows.children[Math.min(offset, rows.children.length - 1)] || null;
+		let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+		while(el && el.parentElement !== rows)
+			el = el.parentElement;
+		return el;
+	}
+	// Column (cell index) of a DOM point = characters before it in its row.
+	function columnBefore(rowEl, node, offset)
+	{
+		const r = document.createRange();
+		r.selectNodeContents(rowEl);
+		try { r.setEnd(node, offset); } catch(e) { return 0; }
+		return r.toString().length;
+	}
+	// xterm's `get selectionText()` reimplemented on the PUBLIC buffer API.
+	// No COLUMN (rectangle) mode; "\n" join (iOS, not Windows).
+	function joinBufferSelection(term, sRow, sCol, eRow, eCol)
+	{
+		const buf = term.buffer.active;
+		const first = buf.getLine(sRow);
+		if(!first)
+			return "";
+		const result = [];
+		const startRowEndCol = (sRow === eRow) ? eCol : undefined;
+		result.push(first.translateToString(true, sCol, startRowEndCol));
+		for(let i = sRow + 1; i <= eRow - 1; i++)
 		{
-			const target = document.elementFromPoint(touch.clientX, touch.clientY) || consoleDiv;
-			target.dispatchEvent(new MouseEvent(type, {
-				bubbles: true, cancelable: true, composed: true,
-				button: 0, buttons: type === "mouseup" ? 0 : 1,
-				// xterm.js's SelectionService checks e.detail (1/2/3 = single/
-				// double/triple click) to pick _handleSingleClick vs. double/triple;
-				// a synthetic MouseEvent defaults detail to 0, which matches none
-				// of those branches and silently no-ops. detail:2 is what makes
-				// this a double-click (word) selection in xterm's eyes.
-				detail: detail,
-				clientX: touch.clientX, clientY: touch.clientY
-			}));
+			const line = buf.getLine(i);
+			if(!line) continue;
+			const text = line.translateToString(true);
+			if(line.isWrapped) result[result.length - 1] += text;
+			else               result.push(text);
 		}
-		function hideCopyButton() { if(copyBtn) { copyBtn.remove(); copyBtn = null; } }
-		// Idempotent end-of-drag: whichever of pointerup / touchend / pointercancel
-		// arrives first finishes the armed selection; the rest see armed=false.
-		function finishArmedDrag(clientX, clientY, timeStamp, showButton)
+		if(sRow !== eRow)
 		{
-			if(!armed)
-				return;
-			armed = false;
-			swallowTrustedMouseUntil = timeStamp + COMPAT_MOUSE_GRACE_MS;
-			dispatchMouse("mouseup", {clientX: clientX, clientY: clientY}, 2);
-			if(showButton && term.hasSelection())
-				showCopyButton({clientX: clientX, clientY: clientY});
-			lastTapTime = 0;
+			const line = buf.getLine(eRow);
+			if(line)
+			{
+				const text = line.translateToString(true, 0, eCol);
+				if(line.isWrapped) result[result.length - 1] += text;
+				else               result.push(text);
+			}
 		}
-		function showCopyButton(touch)
-		{
-			hideCopyButton();
-			copyBtn = document.createElement("button");
-			copyBtn.className = "xterm-copy-btn";
-			copyBtn.textContent = "Copy";
-			copyBtn.style.left = touch.clientX + "px";
-			copyBtn.style.top = Math.max(touch.clientY - 44, 4) + "px";
-			copyBtn.addEventListener("click", (e) => {
-				e.preventDefault(); e.stopPropagation();
-				const text = term.getSelection();
-				if(text)
-					webvmCopy(text);
-				term.clearSelection();
-				hideCopyButton();
-			});
-			document.body.appendChild(copyBtn);
-		}
-
-		consoleDiv.addEventListener("touchstart", (e) => {
-			if(e.touches.length !== 1)
-			{
-				// A second finger joining an armed drag ends the selection
-				// cleanly (synthetic mouseup) instead of leaving xterm's
-				// document-level drag listeners dangling.
-				const t = e.touches[0];
-				finishArmedDrag(t.clientX, t.clientY, e.timeStamp, false);
-				return;
-			}
-			const touch = e.touches[0];
-			touchStartX = touch.clientX; touchStartY = touch.clientY;
-			const now = e.timeStamp;
-			const isDoubleTap = (now - lastTapTime) < DOUBLE_TAP_MS &&
-				Math.hypot(touchStartX - lastTapX, touchStartY - lastTapY) < DOUBLE_TAP_PX;
-			if(isDoubleTap)
-			{
-				// preventDefault also suppresses THIS tap's own compatibility
-				// mouse burst at the source (the spec effect of cancelling
-				// touchstart); the first tap's burst is covered by the
-				// trusted-mouse swallow window.
-				e.preventDefault(); e.stopPropagation();
-				armed = true;
-				swallowTrustedMouseUntil = e.timeStamp + COMPAT_MOUSE_GRACE_MS;
-				hideCopyButton();
-				dispatchMouse("mousedown", touch, 2);
-				lastTapTime = 0; // consumed — a 3rd quick tap starts a fresh pair, not another double
-			}
-			else
-			{
-				armed = false;
-			}
-		}, {capture: true, passive: false});
-
-		consoleDiv.addEventListener("touchmove", (e) => {
-			if(!armed)
-				return; // not a recognized double-tap-drag — leave xterm's own scroll handling alone
-			// On iOS WebKit the armed touch stream is muted (behavior 1 above)
-			// and this never fires; on engines that keep it alive it only
-			// guards the drag from xterm's touch-scroll — the selection itself
-			// is driven from pointermove.
-			e.preventDefault(); e.stopPropagation();
-		}, {capture: true, passive: false});
-
-		// Armed drags are driven from the pointer stream (behavior 1 above):
-		// document-level, mirroring xterm's own document-level mouse listeners,
-		// so the drag keeps extending even outside #console.
-		document.addEventListener("pointermove", (e) => {
-			if(!armed || e.pointerType !== "touch" || !e.isPrimary)
-				return;
-			swallowTrustedMouseUntil = e.timeStamp + COMPAT_MOUSE_GRACE_MS;
-			dispatchMouse("mousemove", e, 2);
-		}, {capture: true});
-		document.addEventListener("pointerup", (e) => {
-			if(e.pointerType !== "touch" || !e.isPrimary)
-				return;
-			finishArmedDrag(e.clientX, e.clientY, e.timeStamp, true);
-		}, {capture: true});
-		document.addEventListener("pointercancel", (e) => {
-			if(e.pointerType !== "touch" || !e.isPrimary)
-				return;
-			finishArmedDrag(e.clientX, e.clientY, e.timeStamp, false);
-		}, {capture: true});
-
-		// Behavior 2 above: swallow trusted mouse events over the terminal
-		// while a touch selection is armed or recently finished, so a late
-		// compatibility burst cannot reset xterm's selection. The bridge's
-		// synthetic (untrusted) events pass through; the Copy button lives on
-		// document.body, outside this subtree, so its tap-click is unaffected.
-		for(const type of ["mousedown", "mousemove", "mouseup", "click"])
-			consoleDiv.addEventListener(type, (e) => {
-				if(!e.isTrusted || e.timeStamp >= swallowTrustedMouseUntil)
-					return;
-				e.preventDefault();
-				e.stopImmediatePropagation();
-			}, {capture: true});
-
-		consoleDiv.addEventListener("touchend", (e) => {
-			const touch = e.changedTouches[0];
-			if(armed)
-			{
-				// Only reachable on engines that keep the armed touch stream
-				// alive (behavior 1); normally pointerup finishes the drag.
-				finishArmedDrag(touch.clientX, touch.clientY, e.timeStamp, true);
-			}
-			else if(Math.hypot(touch.clientX - touchStartX, touch.clientY - touchStartY) < TAP_MAX_MOVE_PX)
-			{
-				// a genuine tap (not a drag/scroll) — remember it as the first half
-				// of a possible double-tap
-				lastTapTime = e.timeStamp; lastTapX = touch.clientX; lastTapY = touch.clientY;
-			}
-			else
-			{
-				lastTapTime = 0; // was a drag/scroll, doesn't count toward double-tap timing
-			}
-		}, {capture: true, passive: true});
+		// nbsp (U+00A0) -> normal space, matching xterm's ALL_NON_BREAKING_SPACE_REGEX.
+		return result.map(l => l.replace(/\u00A0/g, " ")).join("\n");
 	}
 	// Native paste: WKWebView/iOS Safari only grants navigator.clipboard.readText()
 	// during a trusted system-paste gesture, not a scripted button click, so the
@@ -448,7 +366,7 @@
 		window.addEventListener("resize", handleResize);
 		term.focus();
 		term.onData(readData);
-		initTouchSelection(term);
+		enableNativeTouchSelection(term);
 		window.__webvmPaste = webvmPaste;
 		// Avoid undesired default DnD handling
 		function preventDefaults (e) {
@@ -578,7 +496,7 @@
 			// starts (the UI "Connect" button is otherwise the only trigger, always
 			// tapped post-boot; calling networkLogin during boot froze the main thread).
 			if(configObj.netTransport !== "directsockets" && networkInterface.authKey)
-				setTimeout(() => { try { console.log("[net] tailscale auto-connect"); cx.networkLogin(); } catch(e) { console.warn("[net] networkLogin failed: " + e); } }, 5000);
+				setTimeout(() => { try { console.log("[net] tailscale auto-connect"); beginConnect(); cx.networkLogin(); } catch(e) { console.warn("[net] networkLogin failed: " + e); } }, 5000);
 		const display = document.getElementById("display");
 		if(display)
 		{

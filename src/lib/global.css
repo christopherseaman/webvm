@@ -25,17 +25,17 @@ html
 	}
 }
 
-.xterm-copy-btn
-{
-	position: fixed;
-	z-index: 20;
-	padding: 6px 14px;
-	border-radius: 6px;
-	background: #2d2d2d;
-	color: #fff;
-	font-size: 14px;
-	box-shadow: 0 2px 6px rgba(0,0,0,0.4);
-	border: none;
+/* iOS/iPadOS native touch selection (Approach A). Override xterm.css's
+   `.xterm{user-select:none}` on the rendered rows so WKWebView's own
+   long-press -> loupe -> handles -> Copy callout owns selection. Scoped to a
+   class toggled on only for Apple touch devices (WebVM.svelte's
+   enableNativeTouchSelection) so desktop mouse selection via xterm's
+   SelectionService is unaffected. */
+.xterm-native-touch-selection .xterm-rows,
+.xterm-native-touch-selection .xterm-rows * {
+	-webkit-user-select: text;
+	user-select: text;
+	-webkit-touch-callout: default;
 }
 
 .xterm-paste-btn

@@ -54,9 +54,11 @@ struct WasmWebView: UIViewRepresentable {
         // JS, matching a native-app viewport rather than a scrollable page.
         webView.scrollView.isScrollEnabled = false
         webView.scrollView.bounces = false
-        #if DEBUG
+        // Inspectable in Release too (for now): lets us attach Safari Web Inspector
+        // to this WKWebView on a real device (Mac Safari -> Develop -> <device>) to
+        // debug on-device-only behavior like native touch selection. Revert to
+        // `#if DEBUG` before any non-research release.
         webView.isInspectable = true
-        #endif
         let frag = Self.fragment(controlUrl: controlUrl, authKey: authKey)
         let url = URL(string: "http://127.0.0.1:\(port)/index.html\(frag)")!
         webView.load(URLRequest(url: url))

@@ -16,6 +16,29 @@ let loginPromise = null;
 let connectionState = writable("DISCONNECTED");
 let exitNode = writable(false);
 
+// Connect watchdog: if a connect attempt sits in DOWNLOADING with no progress
+// (control plane unreachable — e.g. a DNS filter like NextDNS/Pi-hole sinkholing
+// controlplane.tailscale.com), surface an actionable failure instead of an
+// infinite "Loading IP stack..." spinner.
+let curState = "DISCONNECTED";
+connectionState.subscribe((v) => { curState = v; });
+let connectWatchdog = null;
+const CONNECT_TIMEOUT_MS = 25000;
+function clearConnectWatchdog() { clearTimeout(connectWatchdog); connectWatchdog = null; }
+export function beginConnect()
+{
+	connectionState.set("DOWNLOADING");
+	clearConnectWatchdog();
+	connectWatchdog = setTimeout(() => {
+		if(curState === "DOWNLOADING")
+		{
+			console.warn("[net] tailscale connect timed out after " + (CONNECT_TIMEOUT_MS/1000) +
+				"s — control plane unreachable? (DNS filter blocking controlplane.tailscale.com, or no network)");
+			connectionState.set("CONNECTTIMEOUT");
+		}
+	}, CONNECT_TIMEOUT_MS);
+}
+
 function resetLoginPromise()
 {
 	loginPromise = new Promise((f,r) => {
@@ -35,6 +58,7 @@ function validateLoginUrl(url)
 function loginUrlCb(url)
 {
 	console.log("[net] tailscale loginUrlCb (interactive login requested — unexpected with an authKey)");
+	clearConnectWatchdog();   // control plane responded — not a timeout
 	try
 	{
 		url = validateLoginUrl(url);
@@ -57,6 +81,7 @@ function stateUpdateCb(state)
 	{
 		case 6 /*Running*/:
 		{
+			clearConnectWatchdog();
 			connectionState.set("CONNECTED");
 			break;
 		}
@@ -157,6 +182,15 @@ export function updateButtonData(state, handleConnect) {
 				clickHandler: null,
 				clickUrl: null,
 				buttonTooltip: null,
+				rightClickHandler: null
+			};
+		case "CONNECTTIMEOUT":
+			return {
+				buttonText: "Can't reach Tailscale — retry",
+				isClickable: true,
+				clickHandler: handleConnect,
+				clickUrl: null,
+				buttonTooltip: "No response from controlplane.tailscale.com — a DNS filter (NextDNS/Pi-hole) or firewall may be blocking it. Tap to retry.",
 				rightClickHandler: null
 			};
 		case "CONNECTED":

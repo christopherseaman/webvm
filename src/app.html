@@ -2,13 +2,12 @@
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
-		<!-- maximum-scale=1, user-scalable=no: the layout is a fixed, app-like
-		terminal UI (not a zoomable document — text size already adapts to the
-		viewport), and on iOS this also disables the native double-tap-to-zoom
-		gesture recognizer, which otherwise intercepts a double-tap-then-drag
-		gesture before it reaches touch-selection's JS handling. Desktop browser
-		zoom (Cmd+/-) is unaffected — these attributes only govern mobile pinch/
-		double-tap zoom. -->
+		<!-- maximum-scale=1, user-scalable=no: fixed, app-like terminal UI (not a
+		zoomable document — text size already adapts to the viewport), so mobile
+		pinch / double-tap zoom is disabled. This disables the double-tap-to-zoom
+		recognizer, NOT the long-press text-selection recognizer iOS/WKWebView uses
+		to select terminal row text (Approach A native selection). Desktop browser
+		zoom (Cmd+/-) is unaffected. -->
 		<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 		<title>WebVM - Linux virtualization in WebAssembly</title>
 
