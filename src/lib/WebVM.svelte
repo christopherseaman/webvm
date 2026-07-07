@@ -238,21 +238,25 @@
 		const DOUBLE_TAP_MS = 300, DOUBLE_TAP_PX = 30, TAP_MOVE_PX = 10;
 		let lastTapTime = 0, lastTapX = 0, lastTapY = 0;
 		let armed = false, startX = 0, startY = 0;
-		let anchor = null;   // the double-tapped word {startCol,startRow,endCol,endRow} — fixed extend anchor
+		let anchor = null;   // the double-tapped word — fixed extend anchor
 
+		const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+		function metrics()
+		{
+			const scr = screenEl.getBoundingClientRect();
+			const rr = rowsEl.getBoundingClientRect();
+			return { scr, cw: rr.width / term.cols, ch: rr.height / term.rows, vY: term.buffer.active.viewportY };
+		}
 		// Viewport point (CSS px == UIView points; no page zoom) -> ABSOLUTE buffer
 		// cell {col,row}. Cell width uses term.cols, NOT text length (a past bug).
 		function cellAt(px, py)
 		{
-			const scr = screenEl.getBoundingClientRect();
-			const rr = rowsEl.getBoundingClientRect();
-			const cw = rr.width / term.cols;
-			const ch = rr.height / term.rows;
-			const col = Math.max(0, Math.min(term.cols - 1, Math.floor((px - scr.left) / cw)));
-			const vrow = Math.max(0, Math.min(term.rows - 1, Math.floor((py - scr.top) / ch)));
-			return { col: col, row: term.buffer.active.viewportY + vrow };
+			const m = metrics();
+			return {
+				col: clamp(Math.floor((px - m.scr.left) / m.cw), 0, term.cols - 1),
+				row: m.vY + clamp(Math.floor((py - m.scr.top) / m.ch), 0, term.rows - 1)
+			};
 		}
-		// Whitespace-delimited word bounds around (col) on the buffer line.
 		function wordAt(col, row)
 		{
 			const line = term.buffer.active.getLine(row);
@@ -265,8 +269,7 @@
 			while(b < s.length - 1 && isWord(s[b + 1])) b++;
 			return { startCol: a, endCol: b };
 		}
-		// Select [a..b] inclusive via term.select (length spans rows). No synthetic
-		// mouse events — this is why it works on iOS where the old bridge did not.
+		// Select [a..b] inclusive via term.select (spans rows). No synthetic mouse.
 		function selectRange(a, b)
 		{
 			if(b.row < a.row || (b.row === a.row && b.col < a.col)) { const t = a; a = b; b = t; }
@@ -275,8 +278,100 @@
 			term.select(a.col, a.row, len);
 		}
 
-		// Double-tap -> select the word and arm the drag to extend it. A plain
-		// single-tap-drag is left untouched so it falls through to xterm's scroll.
+		// ---- draggable grips + floating Copy button ----
+		let startHandle = null, endHandle = null, copyBtn = null;
+		let dragging = null, dragAnchor = null;
+		function mkHandle(which)
+		{
+			const h = document.createElement('div');
+			h.className = 'xterm-sel-handle xterm-sel-handle-' + which;
+			h.style.display = 'none';
+			h.addEventListener('pointerdown', (e) => onGripDown(which, h, e));
+			h.addEventListener('pointermove', onGripMove);
+			h.addEventListener('pointerup', (e) => onGripUp(h, e));
+			h.addEventListener('pointercancel', (e) => onGripUp(h, e));
+			document.body.appendChild(h);
+			return h;
+		}
+		function ensureUI()
+		{
+			if(startHandle) return;
+			startHandle = mkHandle('start');
+			endHandle = mkHandle('end');
+			copyBtn = document.createElement('button');
+			copyBtn.className = 'xterm-sel-copy-btn';
+			copyBtn.textContent = 'Copy';
+			copyBtn.style.display = 'none';
+			copyBtn.addEventListener('pointerup', (e) => { e.preventDefault(); e.stopPropagation(); doCopy(); });
+			document.body.appendChild(copyBtn);
+		}
+		function onGripDown(which, h, e)
+		{
+			e.preventDefault(); e.stopPropagation();
+			const r = term.getSelectionPosition();
+			if(!r) return;
+			try { h.setPointerCapture(e.pointerId); } catch(_) {}
+			dragging = which;
+			dragAnchor = (which === 'start') ? { col: r.end.x, row: r.end.y } : { col: r.start.x, row: r.start.y };
+			if(copyBtn) copyBtn.style.display = 'none';
+		}
+		function onGripMove(e)
+		{
+			if(!dragging) return;
+			e.preventDefault();
+			selectRange(dragAnchor, cellAt(e.clientX, e.clientY));   // onSelectionChange -> positionUI
+		}
+		function onGripUp(h, e)
+		{
+			if(!dragging) return;
+			try { h.releasePointerCapture(e.pointerId); } catch(_) {}
+			dragging = null;
+			positionUI();
+		}
+		function doCopy()
+		{
+			const text = term.getSelection();
+			if(text) webvmCopy(text);
+			term.clearSelection();
+			hideUI();
+		}
+		function hideUI()
+		{
+			if(startHandle) startHandle.style.display = 'none';
+			if(endHandle) endHandle.style.display = 'none';
+			if(copyBtn) copyBtn.style.display = 'none';
+		}
+		// Reposition grips + Copy from the current selection. Off-viewport grips hide.
+		function positionUI()
+		{
+			if(!term.hasSelection()) { hideUI(); return; }
+			const r = term.getSelectionPosition();
+			if(!r) { hideUI(); return; }
+			ensureUI();
+			const m = metrics();
+			function place(h, col, row, atEnd)
+			{
+				if(row < m.vY || row >= m.vY + term.rows) { h.style.display = 'none'; return; }
+				h.style.display = 'block';
+				h.style.left = (m.scr.left + (col + (atEnd ? 1 : 0)) * m.cw) + 'px';
+				h.style.top = (m.scr.top + (row - m.vY) * m.ch) + 'px';
+				h.style.height = m.ch + 'px';
+			}
+			place(startHandle, r.start.x, r.start.y, false);
+			place(endHandle, r.end.x, r.end.y, true);
+			if(!dragging && !armed)   // Copy shows once the gesture settles
+			{
+				const x = m.scr.left + r.start.x * m.cw;
+				const y = m.scr.top + (r.start.y - m.vY) * m.ch - 42;
+				copyBtn.style.display = 'block';
+				copyBtn.style.left = clamp(x, 4, window.innerWidth - 70) + 'px';
+				copyBtn.style.top = Math.max(4, y) + 'px';
+			}
+		}
+		term.onSelectionChange(() => positionUI());
+		term.onScroll(() => positionUI());
+
+		// ---- double-tap-drag word selection ----
 		consoleDiv.addEventListener("touchstart", (e) => {
 			if(e.touches.length !== 1) { armed = false; return; }
 			const t = e.touches[0];
@@ -293,12 +388,14 @@
 				anchor = { startCol: w.startCol, startRow: c.row, endCol: w.endCol, endRow: c.row };
 				selectRange({ col: anchor.startCol, row: anchor.startRow }, { col: anchor.endCol, row: anchor.endRow });
 				lastTapTime = 0;
-				console.log("[sel] double-tap word select armed");
 			}
-			else { armed = false; }
+			else
+			{
+				armed = false;
+				if(term.hasSelection()) { term.clearSelection(); hideUI(); }   // tap elsewhere dismisses
+			}
 		}, { capture: true, passive: false });
 
-		// While armed, extend from the anchor WORD out to the finger cell.
 		consoleDiv.addEventListener("touchmove", (e) => {
 			if(!armed) return;   // plain single-drag -> xterm's own touch-scroll
 			e.preventDefault(); e.stopPropagation();
@@ -312,18 +409,25 @@
 
 		consoleDiv.addEventListener("touchend", (e) => {
 			const t = e.changedTouches[0];
-			if(armed) { armed = false; }
+			if(armed) { armed = false; positionUI(); }   // settle -> show Copy
 			else if(Math.hypot(t.clientX - startX, t.clientY - startY) < TAP_MOVE_PX)
 			{
-				lastTapTime = e.timeStamp; lastTapX = t.clientX; lastTapY = t.clientY;   // first half of a double-tap
+				lastTapTime = e.timeStamp; lastTapX = t.clientX; lastTapY = t.clientY;
 			}
-			else { lastTapTime = 0; }   // was a drag/scroll
+			else { lastTapTime = 0; }
 		}, { capture: true, passive: true });
 
-		// Bridge for the copy affordance + the handles increment.
+		// ---- trackpad / mouse wheel -> scroll the terminal buffer (best effort) ----
+		// Two-finger trackpad scroll is otherwise eaten by the disabled scrollView.
+		consoleDiv.addEventListener("wheel", (e) => {
+			if(dragging || armed) return;
+			const lines = Math.sign(e.deltaY) * Math.max(1, Math.round(Math.abs(e.deltaY) / 16));
+			if(lines) { term.scrollLines(lines); e.preventDefault(); }
+		}, { passive: false });
+
 		window.__webvmSelectionText = () => term.getSelection();
-		window.__webvmClearSelection = () => { term.clearSelection(); };
-		console.log("[sel] double-tap-drag word selection ready (JS + term.select, increment 1)");
+		window.__webvmClearSelection = () => { term.clearSelection(); hideUI(); };
+		console.log("[sel] selection + handles + Copy ready (increment 2)");
 	}
 	// Reconstruct clipboard text for the current NATIVE DOM selection over the
 	// terminal rows, mirroring xterm's SelectionService `get selectionText()`:

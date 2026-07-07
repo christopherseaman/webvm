@@ -25,17 +25,44 @@ html
 	}
 }
 
-/* iOS/iPadOS native touch selection (Approach A). Override xterm.css's
-   `.xterm{user-select:none}` on the rendered rows so WKWebView's own
-   long-press -> loupe -> handles -> Copy callout owns selection. Scoped to a
-   class toggled on only for Apple touch devices (WebVM.svelte's
-   enableNativeTouchSelection) so desktop mouse selection via xterm's
-   SelectionService is unaffected. */
-.xterm-native-touch-selection .xterm-rows,
-.xterm-native-touch-selection .xterm-rows * {
-	-webkit-user-select: text;
-	user-select: text;
-	-webkit-touch-callout: default;
+/* iOS/iPadOS touch selection (increment 2): draggable start/end grips + a
+   floating Copy button, positioned by WebVM.svelte's enableNativeTouchSelection.
+   Selection itself is driven via term.select (double-tap-drag / handle drag). */
+.xterm-sel-handle {
+	position: fixed;
+	width: 2px;
+	background: #3b82f6;   /* iOS selection blue */
+	z-index: 30;
+	touch-action: none;    /* the grip drag must not be read as a scroll */
+	will-change: left, top;
+}
+.xterm-sel-handle::before {   /* the round knob */
+	content: '';
+	position: absolute;
+	left: -5px;
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	background: #3b82f6;
+}
+.xterm-sel-handle-start::before { top: -11px; }    /* knob above the line */
+.xterm-sel-handle-end::before { bottom: -11px; }   /* knob below the line */
+.xterm-sel-handle::after {     /* invisible enlarged hit target */
+	content: '';
+	position: absolute;
+	left: -18px; right: -18px; top: -18px; bottom: -18px;
+}
+.xterm-sel-copy-btn {
+	position: fixed;
+	z-index: 31;
+	padding: 6px 14px;
+	border-radius: 6px;
+	background: #2d2d2d;
+	color: #fff;
+	font-size: 14px;
+	box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+	border: none;
+	touch-action: none;
 }
 
 .xterm-paste-btn
