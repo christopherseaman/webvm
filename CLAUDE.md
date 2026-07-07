@@ -140,6 +140,14 @@ Reusable as-is: timestamp build number, on-the-fly `ExportOptions.plist`, single
 
 **Implemented** as `ios/testflight.sh` (this flow, minus the JWT "What to Test" notes step) and verified — a Release build uploaded to TestFlight for `app.ish.iSH.KTGSS9PB3A`.
 
+### Build & push: automation user (`sqrlbot`) vs owner (`cseaman`)
+
+Claude runs as OS user **`sqrlbot`**; the human owner is **`cseaman`**. The repo is group-writable (`cseaman:sqrlbot`, `g+w`), so sqrlbot edits/builds/commits directly — but publishing diverges by user:
+- **Owner push:** `cd ios && ./testflight.sh` — automatic signing with cseaman's cert, builds in-place. Owner-only (the signing key lives in cseaman's login keychain).
+- **sqrlbot push (autonomous):** `ios/tools/push-sqrlbot.sh [branch]` — builds in a **sqrlbot-owned clone** (`~sqrlbot/webvm-push`), **manual-signs** with sqrlbot's *own* self-minted Apple Distribution cert + profile (in the dedicated `webvm-sign` keychain), uploads via the `.p8`. Zero owner involvement. Full setup + gotchas: **`ios/tools/README.md`**.
+- **Why two paths:** Xcode *automatic* signing fails for sqrlbot (it finds cseaman's machine Development cert and refuses to recreate without revoking it — never do that); and the owner's `.svelte-kit`/`build` dirs are `755 cseaman`, so sqrlbot can't wipe them to rebuild in place → it builds in a clone instead.
+- **Verify any push:** `ios/tools/asc_webvm.py` lists recent builds + `processingState` (`.p8` API auth, works for either user). The `.p8` is API auth only — **not** a signing cert.
+
 ### App Store identity
 
 - **Apple Team ID: `KTGSS9PB3A`**.
