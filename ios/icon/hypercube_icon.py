@@ -15,7 +15,7 @@ N = 4                   # lattice cells deep beyond the cube in each -axis dir
 B = 14                  # LED beads per unit edge (per row)
 R0 = 8.2                # bead radius at reference depth
 O = 0.026               # beam half-width in cube units (LED row offset)
-REFL = 0.82             # mirror reflectivity per bounce
+REFL = 0.84             # mirror reflectivity per bounce
 CYCLES = 1.6
 PAL = ["#ff2f57", "#ff7b1a", "#ffcf1f", "#7dff4a", "#2ee6a8", "#3ad1ff",
        "#4f6bff", "#b24bff", "#ff4fa8"]
@@ -102,6 +102,8 @@ for ai, (a, u, v) in enumerate(axes):
                 opa = REFL**b
                 if opa < 0.06:
                     continue
+                if b == 0 and j in (0, 1) and k in (0, 1) and (j, k) != (0, 0):
+                    continue      # white-frame-owned edge (silhouette/near); far-corner Y keeps its LEDs
                 x0, y0, z0 = proj(lerp3(base, a, t0))
                 x1, y1, z1 = proj(lerp3(base, a, t1))
                 zm = (z0+z1)/2
@@ -111,7 +113,7 @@ for ai, (a, u, v) in enumerate(axes):
                 col = pal(hue0 + (t0+t1)/2 * CYCLES/(hi-lo))
                 wd = r * 2.8
                 cores.append((zm, f'<line x1="{x0:.1f}" y1="{y0:.1f}" x2="{x1:.1f}" y2="{y1:.1f}" '
-                              f'stroke="{col}" stroke-width="{wd:.1f}" stroke-opacity="{0.34*opa:.2f}" '
+                              f'stroke="{col}" stroke-width="{wd:.1f}" stroke-opacity="{0.42*opa:.2f}" '
                               f'stroke-linecap="round"/>'))
             # ---- LED bead rows ----
             for m in range(lo*B, hi*B):
@@ -121,6 +123,8 @@ for ai, (a, u, v) in enumerate(axes):
                 opa = REFL**b
                 if opa < 0.05:
                     continue
+                if b == 0 and j in (0, 1) and k in (0, 1) and (j, k) != (0, 0):
+                    continue      # no bead dots along the white frame; far-corner Y keeps its LEDs
                 px, py, z = proj(p)
                 r = R0 * (D - 0.9) / (D - z)
                 if r < 0.5:
@@ -156,16 +160,21 @@ svg.append(f'''<defs>
   <filter id="glow" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB">
     <!-- true bloom: threshold highlights, multi-scale blur, screen-composite -->
     <feComponentTransfer in="SourceGraphic" result="hi0">
-      <feFuncR type="linear" slope="1.5" intercept="-0.25"/>
-      <feFuncG type="linear" slope="1.5" intercept="-0.25"/>
-      <feFuncB type="linear" slope="1.5" intercept="-0.25"/>
+      <feFuncR type="linear" slope="1.55" intercept="-0.19"/>
+      <feFuncG type="linear" slope="1.55" intercept="-0.19"/>
+      <feFuncB type="linear" slope="1.55" intercept="-0.19"/>
     </feComponentTransfer>
-    <feColorMatrix in="hi0" type="saturate" values="1.7" result="hi"/>
+    <feColorMatrix in="hi0" type="saturate" values="1.8" result="hi"/>
     <feGaussianBlur in="hi" stdDeviation="5" result="b1"/>
     <feGaussianBlur in="hi" stdDeviation="14" result="b2"/>
     <feGaussianBlur in="hi" stdDeviation="32" result="b3"/>
+    <feGaussianBlur in="hi" stdDeviation="60" result="b4r"/>
+    <feComponentTransfer in="b4r" result="b4">
+      <feFuncR type="linear" slope="0.5"/><feFuncG type="linear" slope="0.5"/><feFuncB type="linear" slope="0.5"/>
+    </feComponentTransfer>
     <feBlend in="b1" in2="b2" mode="screen" result="b12"/>
-    <feBlend in="b12" in2="b3" mode="screen" result="bloom"/>
+    <feBlend in="b12" in2="b3" mode="screen" result="b123"/>
+    <feBlend in="b123" in2="b4" mode="screen" result="bloom"/>
     <feBlend in="SourceGraphic" in2="bloom" mode="screen"/>
   </filter>
   <filter id="wglow" x="-80%" y="-80%" width="260%" height="260%" color-interpolation-filters="sRGB">
@@ -191,12 +200,12 @@ svg.append(f'<g filter="url(#glow)"><g clip-path="url(#cube)">'
 # frame: black bars with white neon core on the 9 visible physical edges
 NEAR = (1, 1, 1)
 near_edges = [(NEAR, (0, 1, 1)), (NEAR, (1, 0, 1)), (NEAR, (1, 1, 0))]
-frame = [f'<path d="{hull_path}" fill="none" stroke="{FRAME}" stroke-width="30" stroke-linejoin="round"/>']
+frame = [f'<path d="{hull_path}" fill="none" stroke="{FRAME}" stroke-width="60" stroke-linejoin="round"/>']
 neon = [f'<path d="{hull_path}" fill="none" stroke="{WIRE}" stroke-width="9" stroke-linejoin="round"/>']
 for e in near_edges:
     p, q = proj(e[0]), proj(e[1])
     ln = f'x1="{p[0]:.1f}" y1="{p[1]:.1f}" x2="{q[0]:.1f}" y2="{q[1]:.1f}"'
-    frame.append(f'<line {ln} stroke="{FRAME}" stroke-width="26" stroke-linecap="round"/>')
+    frame.append(f'<line {ln} stroke="{FRAME}" stroke-width="52" stroke-linecap="round"/>')
     neon.append(f'<line {ln} stroke="{WIRE}" stroke-width="8" stroke-linecap="round"/>')
 svg.append("".join(frame))
 svg.append(f'<g filter="url(#wglow)">{"".join(neon)}</g>')
