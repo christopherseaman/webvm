@@ -12,7 +12,7 @@ Status + priorities for the **WebVM-as-an-iOS/iPadOS-app** effort (WKWebView wra
 - **General internet works** via Tailscale/lwIP + an admin-approved exit node.
 - **Clipboard capture works**: `command | yank` → host clipboard (OSC 52 → native `UIPasteboard`), and **paste** (native `UIPasteboard`) both verified.
 - **Latest TestFlight build: `1783365177` (VALID)** — awaiting on-device confirmation of `yank` + the scroll fix.
-- **Biggest open item: touch text-selection** — works under Playwright's synthetic events but NOT on real simulator/device; deferred for on-device debugging. iPhone layout/viewport also needs work.
+- **Touch text-selection: FIXED and sim-verified with real HID events (2026-07-06)** — two iOS-WebKit root causes found (synthetic mousedown mutes the touch stream; delayed tap-compat mouse bursts reset xterm selections); armed drags now ride the pointer stream + a trusted-mouse swallow window. Word-by-word drag-extension verified on-simulator via XCUITest; **device confirmation pending** (next TestFlight build). iPhone layout/viewport still needs work.
 - Branch: **`ios-app`** (pushed to `origin`). Everything below is committed except `DECISIONS.md`.
 
 ---
@@ -39,12 +39,12 @@ Status + priorities for the **WebVM-as-an-iOS/iPadOS-app** effort (WKWebView wra
 
 ## In progress / deferred (with specifics)
 
-### 1. Touch text-selection — DEFERRED (highest-value open item)
-Current gesture: **double-click / double-tap + drag** for word-based selection (drives xterm.js's own double-click word-select via a synthetic `mousedown` with `detail:2`); single-tap-drag is reserved for scrolling.
-- ✅ Verified working in Playwright (synthetic `TouchEvent`s → real `SelectionService` → correct `getSelection()`).
-- ❌ On real simulator (mouse) and iPhone (touch): word-select may fire but **drag-to-extend doesn't follow through**.
-- **Leading hypothesis**: a genuine synthetic-vs-real event-translation gap, and/or a native gesture recognizer still arbitrating the touch sequence. The viewport `maximum-scale=1, user-scalable=no` fix (to kill WKWebView's double-tap-to-zoom recognizer) is shipped but **not yet confirmed** to resolve it on-device.
-- **Next step**: debug on-device with **Safari Web Inspector** attached to the WKWebView (`webView.isInspectable = true` is already set in DEBUG builds) — watch which `touch*`/gesture events actually reach the JS handlers on real hardware. Playwright fundamentally cannot verify this.
+### 1. Touch text-selection — FIXED (sim-verified with real events; device confirmation pending)
+Gesture unchanged: **double-click / double-tap + drag** for word-based selection; single-tap-drag stays reserved for scrolling. The 2026-07-06 session built a real-HID-event rig (XCUITest driver + injected raw-event tracer; see the auto-memory `webvm-real-event-test-rig`) and root-caused the failure — it was never a gesture-recognizer/zoom problem:
+1. **Dispatching the synthetic `mousedown` mutes the touch stream** (iOS WebKit): after the bridge's `mousedown(detail:2)`, no `touchmove`/`touchend`/`touchcancel` is ever delivered for that finger (isolated via a 5-way matrix; independent of `preventDefault`/`stopPropagation`/sync-vs-deferred). The **pointer stream keeps flowing** — so the armed drag is now driven from document-level `pointermove`/`pointerup`/`pointercancel`.
+2. **Delayed tap-compatibility mouse bursts** (`mousemove, mousedown detail:1, mouseup, click`, 50ms–4.2s after every un-preventDefault'ed tap — the first tap of a double-tap can't be preventDefault'ed): the burst's `mousedown(detail:1)` resets xterm's selection and its `mouseup` detaches xterm's drag listeners (kill reproduced deterministically). Fixed with a 5s trusted-mouse swallow window over the terminal while armed/recently armed (`isTrusted` discrimination — synthetic bridge events pass; the Copy button lives outside the suppressed subtree).
+- ✅ Verified on-simulator with real HID events: word-by-word growth `"powered" → … → "powered by the CheerpX virtualization engine, which"`, selection persists ≥6s and across an intervening scroll-drag, gesture repeatable, plain drags don't arm, production 300ms double-tap arming + real-burst survival verified via `XCUICoordinate.doubleTap()`.
+- ⏳ Real-device (iPhone/iPad) confirmation via next TestFlight build. If a device still fails, the one mechanism the simulator could not exhibit is UIKit's text-interaction recognizers (loupe/"TapAndAHalfRecognizer") claiming the touch — contingency: `webView.configuration.preferences.isTextInteractionEnabled = false` (iOS 14.5+; side effect: kills native selection in any DOM text inputs, e.g. sidebar fields).
 
 ### 2. iPhone viewport / layout — NOT ADAPTED
 The UI is iPad-tuned. On iPhone the nav header/sidebar and scroll handling don't fit the form factor, and tap+drag still pans. Needs a mobile/responsive pass (this ties into the roadmap "status bar lighter weight" item).
@@ -76,6 +76,9 @@ The UI is iPad-tuned. On iPhone the nav header/sidebar and scroll handling don't
 - **Clipboard needs a user gesture in WKWebView** — both `writeText` and `readText`. Anything not driven by a tap (OSC 52 copy fires from terminal output) must go through the native `UIPasteboard` bridge, not the Clipboard API. Copy uses `nativeCopy`, paste uses `nativePaste` (`ios/App/WasmWebView.swift`).
 - **Disk-image / IDB cache staleness**: the `IDBDevice` block cache can serve stale blocks of a changed disk image on a device that already ran the old one. Fresh installs get a clean cache; otherwise use the app's **reset** button (sidebar). If a newly-added guest command is "not found," this is why.
 - **Test coordinate math**: when synthesizing terminal touch/mouse coords, character width is `rowRect.width / term.cols` (real column count), **not** `/ textContent.length` — that bug made a working selection look broken for a while.
+- **iOS WebKit: synthetic `mousedown` during a live touch mutes that touch stream** (no touchmove/touchend/touchcancel ever again; pointer events unaffected). Any touch→mouse bridge must drive drags from pointer events. Verified via a 5-way isolation matrix of real HID events.
+- **iOS WebKit: every un-preventDefault'ed tap fires a DELAYED trusted mouse burst** (`mousedown detail:1` + `mouseup` + `click`, 50ms–4.2s late under CheerpX load) that resets xterm selections. `user-scalable=no` genuinely disables double-tap-zoom (WebKit-source-verified) — it was never the interceptor.
+- **XCUITest gesture calls have a 3–11s inter-call gap** — a real <300ms double-tap can't be composed from `tap()`+`press()`. Use `doubleTap()` for production-timing arming tests; a temporary `window.__DEBUG_DOUBLE_TAP_MS` knob for armed-drag tests.
 
 ---
 

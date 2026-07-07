@@ -218,14 +218,32 @@
 	// SelectionService only responds to real mousedown/mousemove/mouseup, so
 	// touches are bridged to synthetic mouse events. A PLAIN single-tap-drag is
 	// deliberately left untouched (falls through to xterm's own touch-scroll) —
-	// single-drag is reserved for scrolling. Instead, a double-tap is detected
-	// here and its second touchdown is dispatched as a synthetic mousedown with
+	// single-drag is reserved for scrolling. A double-tap is detected here and
+	// its second touchdown is dispatched as a synthetic mousedown with
 	// detail:2, which xterm.js's SelectionService already treats as a
 	// double-click: it selects the word under the touch and switches to
 	// word-extend mode (_activeSelectionMode=1), so the drag that follows
 	// (still the same, unlifted finger) extends the selection by whole words —
 	// "double-tap and drag" word selection, with no long-press ambiguity.
-	// Registered with {capture:true} so this runs before xterm's own
+	//
+	// Two iOS WebKit behaviors (both confirmed with raw-event traces on real
+	// WebKit, iPadOS 26 simulator) dictate the shape of the implementation:
+	// 1. Dispatching a synthetic mousedown while a touch sequence is in flight
+	//    MUTES that touch sequence: no further touchmove/touchend/touchcancel
+	//    is delivered for the finger. The parallel POINTER stream keeps
+	//    flowing with full coordinates, so the armed drag is driven from
+	//    pointermove/pointerup (document-level), never from touch events.
+	// 2. Every tap whose touchstart was not preventDefault'ed produces a
+	//    DELAYED "compatibility" mouse burst (mousemove, mousedown detail:1,
+	//    mouseup, click) — typically ~50ms-1s later, seconds under CheerpX
+	//    load. The FIRST tap of a double-tap cannot be preventDefault'ed (it
+	//    is not yet known to be one), so its burst can land mid-drag or after
+	//    the selection completed, where xterm would treat mousedown detail:1
+	//    as a fresh single-click (destroying the selection) and mouseup as
+	//    end-of-drag (detaching its document listeners). Trusted mouse events
+	//    over the terminal are therefore swallowed while a touch selection is
+	//    armed and for a grace period afterwards.
+	// Registered with {capture:true} so these run before xterm's own
 	// touchstart/touchmove (scroll-by-drag, on a descendant of #console), which
 	// would otherwise fire first and scroll the buffer out from under a
 	// double-tap-triggered selection.
@@ -237,8 +255,10 @@
 		const DOUBLE_TAP_MS = 300;
 		const DOUBLE_TAP_PX = 30;
 		const TAP_MAX_MOVE_PX = 10;
+		const COMPAT_MOUSE_GRACE_MS = 5000;
 		let armed = false, touchStartX = 0, touchStartY = 0;
 		let lastTapTime = 0, lastTapX = 0, lastTapY = 0;
+		let swallowTrustedMouseUntil = 0;
 		let copyBtn = null;
 
 		function dispatchMouse(type, touch, detail)
@@ -257,6 +277,19 @@
 			}));
 		}
 		function hideCopyButton() { if(copyBtn) { copyBtn.remove(); copyBtn = null; } }
+		// Idempotent end-of-drag: whichever of pointerup / touchend / pointercancel
+		// arrives first finishes the armed selection; the rest see armed=false.
+		function finishArmedDrag(clientX, clientY, timeStamp, showButton)
+		{
+			if(!armed)
+				return;
+			armed = false;
+			swallowTrustedMouseUntil = timeStamp + COMPAT_MOUSE_GRACE_MS;
+			dispatchMouse("mouseup", {clientX: clientX, clientY: clientY}, 2);
+			if(showButton && term.hasSelection())
+				showCopyButton({clientX: clientX, clientY: clientY});
+			lastTapTime = 0;
+		}
 		function showCopyButton(touch)
 		{
 			hideCopyButton();
@@ -277,7 +310,15 @@
 		}
 
 		consoleDiv.addEventListener("touchstart", (e) => {
-			if(e.touches.length !== 1) { armed = false; return; }
+			if(e.touches.length !== 1)
+			{
+				// A second finger joining an armed drag ends the selection
+				// cleanly (synthetic mouseup) instead of leaving xterm's
+				// document-level drag listeners dangling.
+				const t = e.touches[0];
+				finishArmedDrag(t.clientX, t.clientY, e.timeStamp, false);
+				return;
+			}
 			const touch = e.touches[0];
 			touchStartX = touch.clientX; touchStartY = touch.clientY;
 			const now = e.timeStamp;
@@ -285,8 +326,13 @@
 				Math.hypot(touchStartX - lastTapX, touchStartY - lastTapY) < DOUBLE_TAP_PX;
 			if(isDoubleTap)
 			{
+				// preventDefault also suppresses THIS tap's own compatibility
+				// mouse burst at the source (the spec effect of cancelling
+				// touchstart); the first tap's burst is covered by the
+				// trusted-mouse swallow window.
 				e.preventDefault(); e.stopPropagation();
 				armed = true;
+				swallowTrustedMouseUntil = e.timeStamp + COMPAT_MOUSE_GRACE_MS;
 				hideCopyButton();
 				dispatchMouse("mousedown", touch, 2);
 				lastTapTime = 0; // consumed — a 3rd quick tap starts a fresh pair, not another double
@@ -300,20 +346,53 @@
 		consoleDiv.addEventListener("touchmove", (e) => {
 			if(!armed)
 				return; // not a recognized double-tap-drag — leave xterm's own scroll handling alone
-			const touch = e.touches[0];
+			// On iOS WebKit the armed touch stream is muted (behavior 1 above)
+			// and this never fires; on engines that keep it alive it only
+			// guards the drag from xterm's touch-scroll — the selection itself
+			// is driven from pointermove.
 			e.preventDefault(); e.stopPropagation();
-			dispatchMouse("mousemove", touch, 2);
 		}, {capture: true, passive: false});
+
+		// Armed drags are driven from the pointer stream (behavior 1 above):
+		// document-level, mirroring xterm's own document-level mouse listeners,
+		// so the drag keeps extending even outside #console.
+		document.addEventListener("pointermove", (e) => {
+			if(!armed || e.pointerType !== "touch" || !e.isPrimary)
+				return;
+			swallowTrustedMouseUntil = e.timeStamp + COMPAT_MOUSE_GRACE_MS;
+			dispatchMouse("mousemove", e, 2);
+		}, {capture: true});
+		document.addEventListener("pointerup", (e) => {
+			if(e.pointerType !== "touch" || !e.isPrimary)
+				return;
+			finishArmedDrag(e.clientX, e.clientY, e.timeStamp, true);
+		}, {capture: true});
+		document.addEventListener("pointercancel", (e) => {
+			if(e.pointerType !== "touch" || !e.isPrimary)
+				return;
+			finishArmedDrag(e.clientX, e.clientY, e.timeStamp, false);
+		}, {capture: true});
+
+		// Behavior 2 above: swallow trusted mouse events over the terminal
+		// while a touch selection is armed or recently finished, so a late
+		// compatibility burst cannot reset xterm's selection. The bridge's
+		// synthetic (untrusted) events pass through; the Copy button lives on
+		// document.body, outside this subtree, so its tap-click is unaffected.
+		for(const type of ["mousedown", "mousemove", "mouseup", "click"])
+			consoleDiv.addEventListener(type, (e) => {
+				if(!e.isTrusted || e.timeStamp >= swallowTrustedMouseUntil)
+					return;
+				e.preventDefault();
+				e.stopImmediatePropagation();
+			}, {capture: true});
 
 		consoleDiv.addEventListener("touchend", (e) => {
 			const touch = e.changedTouches[0];
 			if(armed)
 			{
-				dispatchMouse("mouseup", touch, 2);
-				if(term.hasSelection())
-					showCopyButton(touch);
-				armed = false;
-				lastTapTime = 0;
+				// Only reachable on engines that keep the armed touch stream
+				// alive (behavior 1); normally pointerup finishes the drag.
+				finishArmedDrag(touch.clientX, touch.clientY, e.timeStamp, true);
 			}
 			else if(Math.hypot(touch.clientX - touchStartX, touch.clientY - touchStartY) < TAP_MAX_MOVE_PX)
 			{
