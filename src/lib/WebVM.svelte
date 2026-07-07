@@ -237,7 +237,7 @@
 			return;
 		const DOUBLE_TAP_MS = 300, DOUBLE_TAP_PX = 30, TAP_MOVE_PX = 10;
 		let lastTapTime = 0, lastTapX = 0, lastTapY = 0;
-		let armed = false, startX = 0, startY = 0;
+		let armed = false, startX = 0, startY = 0, capturedId = null;
 		let anchor = null;   // the double-tapped word — fixed extend anchor
 
 		const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -247,8 +247,6 @@
 			const rr = rowsEl.getBoundingClientRect();
 			return { scr, cw: rr.width / term.cols, ch: rr.height / term.rows, vY: term.buffer.active.viewportY };
 		}
-		// Viewport point (CSS px == UIView points; no page zoom) -> ABSOLUTE buffer
-		// cell {col,row}. Cell width uses term.cols, NOT text length (a past bug).
 		function cellAt(px, py)
 		{
 			const m = metrics();
@@ -269,7 +267,6 @@
 			while(b < s.length - 1 && isWord(s[b + 1])) b++;
 			return { startCol: a, endCol: b };
 		}
-		// Select [a..b] inclusive via term.select (spans rows). No synthetic mouse.
 		function selectRange(a, b)
 		{
 			if(b.row < a.row || (b.row === a.row && b.col < a.col)) { const t = a; a = b; b = t; }
@@ -341,25 +338,29 @@
 			if(endHandle) endHandle.style.display = 'none';
 			if(copyBtn) copyBtn.style.display = 'none';
 		}
-		// Reposition grips + Copy from the current selection. Off-viewport grips hide.
+		// Reposition grips + Copy. Skipped during the double-tap-drag (armed) so
+		// grips appear only once the gesture settles (matching iOS).
 		function positionUI()
 		{
+			if(armed) return;
 			if(!term.hasSelection()) { hideUI(); return; }
 			const r = term.getSelectionPosition();
 			if(!r) { hideUI(); return; }
 			ensureUI();
 			const m = metrics();
-			function place(h, col, row, atEnd)
+			// start.x is the first selected cell (left edge); end.x is EXCLUSIVE —
+			// one past the last cell — which is already the highlight's right edge.
+			function place(h, col, row)
 			{
 				if(row < m.vY || row >= m.vY + term.rows) { h.style.display = 'none'; return; }
 				h.style.display = 'block';
-				h.style.left = (m.scr.left + (col + (atEnd ? 1 : 0)) * m.cw) + 'px';
+				h.style.left = (m.scr.left + col * m.cw) + 'px';
 				h.style.top = (m.scr.top + (row - m.vY) * m.ch) + 'px';
 				h.style.height = m.ch + 'px';
 			}
-			place(startHandle, r.start.x, r.start.y, false);
-			place(endHandle, r.end.x, r.end.y, true);
-			if(!dragging && !armed)   // Copy shows once the gesture settles
+			place(startHandle, r.start.x, r.start.y);
+			place(endHandle, r.end.x, r.end.y);
+			if(!dragging)
 			{
 				const x = m.scr.left + r.start.x * m.cw;
 				const y = m.scr.top + (r.start.y - m.vY) * m.ch - 42;
@@ -371,17 +372,21 @@
 		term.onSelectionChange(() => positionUI());
 		term.onScroll(() => positionUI());
 
-		// ---- double-tap-drag word selection ----
-		consoleDiv.addEventListener("touchstart", (e) => {
-			if(e.touches.length !== 1) { armed = false; return; }
-			const t = e.touches[0];
-			startX = t.clientX; startY = t.clientY;
+		// ---- double-tap-drag word selection via POINTER events + setPointerCapture.
+		// Capture pins the drag to consoleDiv so a native recognizer can't steal the
+		// follow-on move on real touch (the failure mode of touch events here). A
+		// separate touchmove-block stops xterm's own touch-scroll during the drag.
+		consoleDiv.addEventListener("pointerdown", (e) => {
+			if(e.pointerType === "pen") return;
+			startX = e.clientX; startY = e.clientY;
 			const now = e.timeStamp;
 			const isDouble = (now - lastTapTime) < DOUBLE_TAP_MS &&
 				Math.hypot(startX - lastTapX, startY - lastTapY) < DOUBLE_TAP_PX;
 			if(isDouble)
 			{
-				e.preventDefault(); e.stopPropagation();
+				e.preventDefault();
+				try { consoleDiv.setPointerCapture(e.pointerId); } catch(_) {}
+				capturedId = e.pointerId;
 				armed = true;
 				const c = cellAt(startX, startY);
 				const w = wordAt(c.col, c.row);
@@ -394,31 +399,43 @@
 				armed = false;
 				if(term.hasSelection()) { term.clearSelection(); hideUI(); }   // tap elsewhere dismisses
 			}
-		}, { capture: true, passive: false });
+		}, true);
 
-		consoleDiv.addEventListener("touchmove", (e) => {
-			if(!armed) return;   // plain single-drag -> xterm's own touch-scroll
-			e.preventDefault(); e.stopPropagation();
-			const c = cellAt(e.touches[0].clientX, e.touches[0].clientY);
+		consoleDiv.addEventListener("pointermove", (e) => {
+			if(!armed || e.pointerId !== capturedId) return;
+			e.preventDefault();
+			const c = cellAt(e.clientX, e.clientY);
 			const lo = { col: anchor.startCol, row: anchor.startRow };
 			const hi = { col: anchor.endCol, row: anchor.endRow };
 			const a = (c.row < lo.row || (c.row === lo.row && c.col < lo.col)) ? c : lo;
 			const b = (c.row > hi.row || (c.row === hi.row && c.col > hi.col)) ? c : hi;
 			selectRange(a, b);
-		}, { capture: true, passive: false });
+		}, true);
 
-		consoleDiv.addEventListener("touchend", (e) => {
-			const t = e.changedTouches[0];
-			if(armed) { armed = false; positionUI(); }   // settle -> show Copy
-			else if(Math.hypot(t.clientX - startX, t.clientY - startY) < TAP_MOVE_PX)
+		function endDrag(e)
+		{
+			if(armed && e.pointerId === capturedId)
 			{
-				lastTapTime = e.timeStamp; lastTapX = t.clientX; lastTapY = t.clientY;
+				try { consoleDiv.releasePointerCapture(e.pointerId); } catch(_) {}
+				capturedId = null; armed = false; positionUI();   // settle -> show grips + Copy
+			}
+			else if(Math.hypot(e.clientX - startX, e.clientY - startY) < TAP_MOVE_PX)
+			{
+				lastTapTime = e.timeStamp; lastTapX = e.clientX; lastTapY = e.clientY;   // half of a double-tap
 			}
 			else { lastTapTime = 0; }
-		}, { capture: true, passive: true });
+		}
+		consoleDiv.addEventListener("pointerup", endDrag, true);
+		consoleDiv.addEventListener("pointercancel", (e) => {
+			if(e.pointerId === capturedId) { capturedId = null; armed = false; positionUI(); }
+		}, true);
+
+		// Block xterm's own touch-scroll only while a selection drag is active.
+		consoleDiv.addEventListener("touchmove", (e) => {
+			if(armed) { e.preventDefault(); e.stopPropagation(); }
+		}, { capture: true, passive: false });
 
 		// ---- trackpad / mouse wheel -> scroll the terminal buffer (best effort) ----
-		// Two-finger trackpad scroll is otherwise eaten by the disabled scrollView.
 		consoleDiv.addEventListener("wheel", (e) => {
 			if(dragging || armed) return;
 			const lines = Math.sign(e.deltaY) * Math.max(1, Math.round(Math.abs(e.deltaY) / 16));
@@ -427,7 +444,7 @@
 
 		window.__webvmSelectionText = () => term.getSelection();
 		window.__webvmClearSelection = () => { term.clearSelection(); hideUI(); };
-		console.log("[sel] selection + handles + Copy ready (increment 2)");
+		console.log("[sel] selection + handles + Copy ready (increment 3: pointer drag + end-handle fix)");
 	}
 	// Reconstruct clipboard text for the current NATIVE DOM selection over the
 	// terminal rows, mirroring xterm's SelectionService `get selectionText()`:
