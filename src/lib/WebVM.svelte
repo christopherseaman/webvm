@@ -214,40 +214,55 @@
 			return true;
 		});
 	}
-	// iOS/iPadOS native touch selection (Approach A). The old approach bridged
-	// touch to synthetic mouse events to drive xterm's mouse-only SelectionService;
-	// it worked on the Mac-hosted simulator but NOT on real iOS WebKit. Instead,
-	// let WKWebView's own long-press -> magnifier loupe -> drag handles -> system
-	// Copy callout select the DOM row text directly. enableNativeTouchSelection
-	// re-enables user-select on the rendered rows (via a CSS class) and installs a
-	// wrap-aware `copy` interceptor so soft-wrapped commands/paths round-trip.
+	// iOS/iPadOS native touch selection (Approach B). Native Swift host-drawn
+	// handles + edit menu (ios/App/) drive xterm's OWN selection model via this
+	// bridge; xterm renders the highlight on its .xterm-selection overlay. Rows
+	// stay non-selectable (no WebKit web-content selection), so nothing competes
+	// with the native gestures and the soft keyboard (text interaction) is
+	// untouched. (Approach A — WebKit web selection via user-select:text — worked
+	// but was imprecise with no adjustable handles; the synthetic-mouse bridge
+	// before it worked only on the simulator. This is the third and native path.)
 	function enableNativeTouchSelection(term)
 	{
 		const ua = navigator.userAgent;
-		// Apple touch devices (iPad/iPhone), for BOTH finger and trackpad/mouse
-		// cursor. Excludes desktop (xterm's own mouse selection) and Android.
 		const isAppleTouch = (navigator.maxTouchPoints > 0 ||
 			window.matchMedia('(hover: none) and (pointer: coarse)').matches) &&
 			/AppleWebKit/.test(ua) && !/Android/i.test(ua);
 		if(!isAppleTouch || !term.element)
 			return;
-		term.element.classList.add('xterm-native-touch-selection');
-		console.log("[sel] native touch selection enabled (Approach A): user-select:text on .xterm-rows");
-		// Wrap-aware copy: a raw DOM copy emits one <div> per VISUAL row, so a
-		// soft-wrapped logical line gets spurious newlines. Reconstruct logical
-		// lines from xterm's buffer model instead. xterm's own `copy` listener
-		// early-returns on an empty MODEL selection (a native DOM selection is
-		// always empty in the model), so it never fights this one. Capture phase.
-		document.addEventListener("copy", (e) => {
-			const text = normalizedTerminalSelection(term);
-			if(!text)
-				return;                              // not our selection: default copy
-			e.preventDefault();
-			if(e.clipboardData)
-				e.clipboardData.setData("text/plain", text);
-			webvmCopy(text);                          // unify native UIPasteboard + OSC-52
-		}, true);
-		window.__webvmNormalizedSelection = () => normalizedTerminalSelection(term);
+		const screenEl = term.element.querySelector('.xterm-screen');
+		const rowsEl = term.element.querySelector('.xterm-rows');
+		if(!screenEl || !rowsEl)
+			return;
+		// Map a viewport point (CSS px == UIView points; no page zoom) to an
+		// ABSOLUTE buffer cell {col,row}. Cell width uses term.cols, NOT text
+		// length (a past bug). row = viewportY (ydisp) + visible row.
+		function cellAt(px, py)
+		{
+			const scr = screenEl.getBoundingClientRect();
+			const rr = rowsEl.getBoundingClientRect();
+			const cw = rr.width / term.cols;
+			const ch = rr.height / term.rows;
+			let col = Math.floor((px - scr.left) / cw);
+			let vrow = Math.floor((py - scr.top) / ch);
+			col = Math.max(0, Math.min(term.cols - 1, col));
+			vrow = Math.max(0, Math.min(term.rows - 1, vrow));
+			return { col: col, row: term.buffer.active.viewportY + vrow };
+		}
+		// PHASE-1 de-risk bridge: the native pan forwards two viewport points; set
+		// the terminal selection between them (order-normalized, end-inclusive).
+		// The full build replaces this with per-handle setSelection calls.
+		window.__webvmDragSelect = (x0, y0, x1, y1) => {
+			let a = cellAt(x0, y0), b = cellAt(x1, y1);
+			if(b.row < a.row || (b.row === a.row && b.col < a.col)) { const t = a; a = b; b = t; }
+			const len = (b.row - a.row) * term.cols + (b.col - a.col) + 1;
+			if(len <= 0) { term.clearSelection(); return; }
+			term.select(a.col, a.row, len);
+		};
+		window.__webvmSelectionText = () => term.getSelection();   // wrap-aware natively
+		window.__webvmClearSelection = () => term.clearSelection();
+		window.__webvmHasSelection = () => term.hasSelection();
+		console.log("[sel-b] native-handle bridge ready (Approach B, phase-1 spike)");
 	}
 	// Reconstruct clipboard text for the current NATIVE DOM selection over the
 	// terminal rows, mirroring xterm's SelectionService `get selectionText()`:
