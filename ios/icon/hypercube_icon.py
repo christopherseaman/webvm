@@ -10,7 +10,8 @@ CC = 512
 YAW = math.radians(-40)
 PITCH = math.radians(28)
 D = 3.5                 # camera distance in cube units
-FIT = 0.80              # cube hull occupies this fraction of canvas
+FIT = 0.93                # cube hull occupies this fraction of canvas
+YOFF = -47                 # shift the whole cube up (px): balances top/bottom margins
 N = 4                   # lattice cells deep beyond the cube in each -axis dir
 B = 14                  # LED beads per unit edge (per row)
 R0 = 8.2                # bead radius at reference depth
@@ -45,7 +46,7 @@ SCALE = (W/2) * FIT / ext
 def proj(p):
     x, y, z = rot(p)
     s = SCALE / (D - z)
-    return (CC + x*s, CC - y*s, z)
+    return (CC + x*s, CC - y*s + YOFF, z)
 
 def hx(h): return tuple(int(h[i:i+2], 16) for i in (1, 3, 5))
 def pal(x):
