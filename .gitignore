@@ -8,3 +8,4 @@ nginx_access.log
 nginx_error.log
 nginx_main_error.log
 .playwright-mcp/
+.temp/
